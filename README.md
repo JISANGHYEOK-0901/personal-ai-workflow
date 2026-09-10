@@ -20,10 +20,14 @@
 ```bash
 python3 scripts/sync_skills.py --write
 python3 scripts/sync_skills.py --check
+python3 scripts/check_integrity.py
+python3 -m unittest discover -s tests -p '*.py'
 git diff --check
 ```
 
 [기존 프로젝트 도입 방법](docs/ADOPTION.md)을 따라 기존 지침에 연결한다. 이 저장소의 설정으로 기존 파일을 덮어쓰지 않는다. 도구별 파일 일치와 실제 행동 동등성은 별개이며 [검증 기록](docs/VALIDATION.md)에 확인 범위를 남긴다.
+
+[정합성 CI](docs/CI.md)는 PR과 develop/main push에서 실행한다. 필수 체크·브랜치 보호 설정과는 별개다.
 
 ## 설계와 후속 작업
 

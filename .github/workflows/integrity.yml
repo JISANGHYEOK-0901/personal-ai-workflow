@@ -1,0 +1,33 @@
+name: Workflow integrity
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integrity:
+    name: integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify generated skill copies
+        run: python3 scripts/sync_skills.py --check
+      - name: Check repository integrity
+        run: python3 scripts/check_integrity.py
+      - name: Run regression scenarios
+        run: python3 -m unittest discover -s tests -p '*.py' -v
+      - name: Check whitespace
+        run: git show --format= --check HEAD
