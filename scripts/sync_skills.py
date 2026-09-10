@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
 """Sync this repository's canonical skills to its three tool directories."""
 import argparse
+import os
+import stat
+import tempfile
 from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ('.agents/skills', '.claude/skills', '.cursor/skills')
+
+
+def atomic_write(dest, data):
+    """Replace one file atomically; a failed write leaves its old bytes intact."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(dest.stat().st_mode) if dest.exists() else 0o644
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=dest.parent, prefix='.sync-', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(mode)
+        os.replace(temporary, dest)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def main():
@@ -15,6 +36,8 @@ def main():
     mode.add_argument('--write', action='store_true', help='Update managed skill copies')
     args = parser.parse_args()
     source = ROOT / 'skills'
+    if source.is_symlink():
+        raise ValueError(f'Canonical directory symlink not supported: {source}')
     skills = sorted(p for p in source.iterdir() if p.is_dir())
     if not skills:
         raise ValueError('No canonical skills found')
@@ -59,8 +82,7 @@ def main():
         print(f'OK: {len(skills)} canonical skill(s), {len(TARGETS)} synchronized tool directories')
         return 0
     for dest, data in changes:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
+        atomic_write(dest, data)
     print(f'Updated {len(changes)} files; unchanged files preserved')
     return 0
 

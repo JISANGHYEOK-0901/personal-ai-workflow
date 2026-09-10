@@ -33,3 +33,7 @@ ai-input/
 
 # Local IDE metadata
 .idea/
+
+# Python validation cache
+__pycache__/
+*.py[cod]
