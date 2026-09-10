@@ -3,7 +3,8 @@
 ## 현재 기본 구성
 
 - `workflow/CORE.md`: 규모·언어와 무관한 공통 작성·검증·권한 기준. AZTKS 작성 기준이 기본 포함된다.
-- `skills/execute/`: 활성 스킬 정본. 세 도구의 skills/execute 사본은 동기화 스크립트가 관리한다.
+- `skills/execute/`: 활성 실행 스킬 정본. 세 도구의 skills/execute 사본은 동기화 스크립트가 관리한다.
+- `skills/pr-lifecycle/`: PR 생성·검토·승인된 머지·작업 브랜치 정리의 활성 정본.
 - `PROJECT.md`: 이 저장소 설정. `templates/PROJECT.md`는 다른 프로젝트 도입용 양식.
 - `docs/WORKLOG_POLICY.md`: 기존 작업 단위 기록 정책. ai-input 전체는 로컬 유지.
 - 자동 하위 에이전트·전문 업무 스크립트는 기본 활성화하지 않는다.
@@ -15,7 +16,7 @@
 | aztks | 5개 작성 기준을 CORE에 포함. 적용 선언·평가표 강제 제거 | 상세 평가 필요 시 별도 review로 발전 |
 | grip-it | execute의 중요 미정 목록·권장안·결정 재사용 | 복잡한 인터뷰가 반복되면 clarify 분리 |
 | goal-setting | execute의 목표·범위·검증·종료 한도 | 도구별 goal 명령 연결은 필요 시 |
-| review-merge | 공통 권한·영향 검증, 프로젝트별 Git 설정 원칙 | PR 스택 전용 실행 절차는 보관 |
+| review-merge | 공통 권한·영향 검증, 프로젝트별 Git 설정 원칙 | PR 수명주기는 pr-lifecycle로 활성화. 복잡한 스택 전용 구현은 후속 |
 | merge-review | 영역 간 통합 검증 원칙 | main 선머지는 기본 절차 아님 |
 | playboard | 공통 정본·중복 기록 방지 원칙 | 레지스트리·상황판 구축은 필요 시 |
 | notion-export | 원본·출처 보존, 기본 실행 경로에서 제외 | 검토 버전·분리 출력 적용 후 복원 |
