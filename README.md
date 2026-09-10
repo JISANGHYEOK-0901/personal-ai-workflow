@@ -1,27 +1,31 @@
 # Personal AI Workflow
 
-설치한 범용 스킬의 유연성과 ly에서 참고한 범위·권한·검증·기록 원칙을 결합해, 여러 실무에 재사용할 개인 AI 템플릿·스킬셋을 만든다.
+개인·소규모·대규모 프로젝트와 다양한 언어·풀스택에서 재사용할 개인 AI 작업 체계다. ly의 범위·권한·검증·기록 원칙과 외부 스킬의 방법론을 조합했다. 절차의 깊이는 코드 줄 수보다 실제 변경 영향에 맞춘다.
 
-## 현재 상태
+## 현재 구현 v0.1
 
-- Claude·Codex·Cursor용 외부 스킬 8개와 에이전트, 참조 문서, Notion 스크립트가 설치된 기준 상태.
-- 개인 공통 지침과 작업 단위 기록 규칙 마련. 개인 스킬셋 설계는 진행중이며 구현은 미착수.
-- AI 대학원 준비용 개인 프로젝트에 적용할 계획이며 구체 연구 주제는 미정.
+- [공통 원칙](workflow/CORE.md): AZTKS를 기본 작성·검증 과정에 반영. 별도 호출이나 매번 평가표가 필요하지 않다.
+- [execute](skills/execute/SKILL.md): 목표·미정 결정·실행·영향 추적·검증·종료. 다중 언어·서비스는 필요한 때만 추가 참조를 읽는다.
+- [프로젝트 설정](PROJECT.md) / [설정 템플릿](templates/PROJECT.md): 실제 경로·검증·Git·한도를 환경별로 정의한다.
+- [작업 기록 정책](docs/WORKLOG_POLICY.md): 작업 ID별 갱신, 월별 폴더. ai-input 전체는 항상 Git 제외.
+- [스킬 정리 내역](docs/SKILL_INVENTORY.md): 원본 8개 스킬과 에이전트는 비활성 보관하고 활성 경로에는 execute만 둔다.
 
-## 첫 작업
+## 관리
 
-ly와 설치 스킬의 규칙을 비교해 유지·통합·선택형 전환·제외할 항목을 정한다. 이후 최소 템플릿을 작성하고 실제 작업에서 검증한다.
+공통 규칙은 workflow/CORE.md, 스킬은 skills/에서 수정한다. 도구별 사본은 직접 수정하지 않는다.
 
-## 구성
+```bash
+python3 scripts/sync_skills.py --write
+python3 scripts/sync_skills.py --check
+git diff --check
+```
 
-- `AGENTS.md`, `CLAUDE.md`: 프로젝트 지침.
-- `docs/WORKLOG_POLICY.md`: 작업 단위 기록 규칙 정본.
-- `.agents/`, `.claude/`, `.cursor/`: 도구별 설치 스킬·에이전트.
-- `reference/`, `scripts/`: 외부 스킬의 참조 문서·스크립트.
-- `third-party/`: 원본 저장소·커밋·일치 파일 해시 및 라이선스.
+[기존 프로젝트 도입 방법](docs/ADOPTION.md)을 따라 기존 지침에 연결한다. 이 저장소의 설정으로 기존 파일을 덮어쓰지 않는다. 도구별 파일 일치와 실제 행동 동등성은 별개이며 [검증 기록](docs/VALIDATION.md)에 확인 범위를 남긴다.
 
-`ai-input/` 전체는 개인 로컬 데이터로 항상 Git에서 제외한다. 강제 추가하지 않는다.
+## 설계와 후속 작업
+
+[설계 초안](docs/PERSONAL_WORKFLOW_DRAFT.md), [규칙 30개·검증 사례](docs/RULE_ADOPTION_CATALOG.md)를 바탕으로 첫 구현을 만들었다. PR·상황판·백업·프로필은 필요할 때 개인화해 확장한다. AI 대학원 준비 프로젝트의 구체 연구 주제는 미정이다.
 
 ## 외부 자료
 
-설치 파일과 이전 설치 시 사용한 로컬 원본 사본의 SHA-256 일치 관계를 [출처 기록](third-party/sources.json)에 남겼다. 원본의 MIT 라이선스와 저작권 고지는 `third-party/licenses/`에 보존한다. 이 기록은 보안 검토나 실행 검증을 의미하지 않는다. 외부 스킬 본문은 아직 개인화하지 않았다.
+원본은 third-party/installed-baseline에 보존했다. [출처 기록](third-party/sources.json)에 원래 경로·보관 경로·커밋·해시가 있으며, MIT 라이선스는 third-party/licenses에 유지한다. 원본을 현재 실행 지침으로 사용하지 않는다.

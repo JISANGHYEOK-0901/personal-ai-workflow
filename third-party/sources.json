@@ -7,32 +7,38 @@
       {
         "installed_path": ".agents/agents/aztks-agent.md",
         "source_path": ".cursor/agents/aztks-agent.md",
-        "sha256": "069c44742b0056299b36e39462fd88df6299027af1d143c7f049dfb53e5aa0cb"
+        "sha256": "069c44742b0056299b36e39462fd88df6299027af1d143c7f049dfb53e5aa0cb",
+        "archived_path": "third-party/installed-baseline/.agents/agents/aztks-agent.md"
       },
       {
         "installed_path": ".agents/skills/aztks/SKILL.md",
         "source_path": ".agents/skills/aztks/SKILL.md",
-        "sha256": "30d1493bfa897befb3e04836c39f180ab1cc981dddfe750783d20ff36499e961"
+        "sha256": "30d1493bfa897befb3e04836c39f180ab1cc981dddfe750783d20ff36499e961",
+        "archived_path": "third-party/installed-baseline/.agents/skills/aztks/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/agents/aztks-agent.md",
         "source_path": ".claude/agents/aztks-agent.md",
-        "sha256": "8bf367dbc2de92f2a067d65f6e8ca1e290b3d14be905136c9c57b01828813199"
+        "sha256": "8bf367dbc2de92f2a067d65f6e8ca1e290b3d14be905136c9c57b01828813199",
+        "archived_path": "third-party/installed-baseline/.claude/agents/aztks-agent.md"
       },
       {
         "installed_path": ".claude/skills/aztks/SKILL.md",
         "source_path": ".claude/skills/aztks/SKILL.md",
-        "sha256": "973787f3712a7d48f64d48f1a1432e7be73442c03d392fa45399a7101fb09da6"
+        "sha256": "973787f3712a7d48f64d48f1a1432e7be73442c03d392fa45399a7101fb09da6",
+        "archived_path": "third-party/installed-baseline/.claude/skills/aztks/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/agents/aztks-agent.md",
         "source_path": ".cursor/agents/aztks-agent.md",
-        "sha256": "069c44742b0056299b36e39462fd88df6299027af1d143c7f049dfb53e5aa0cb"
+        "sha256": "069c44742b0056299b36e39462fd88df6299027af1d143c7f049dfb53e5aa0cb",
+        "archived_path": "third-party/installed-baseline/.cursor/agents/aztks-agent.md"
       },
       {
         "installed_path": ".cursor/skills/aztks/SKILL.md",
         "source_path": ".cursor/skills/aztks/SKILL.md",
-        "sha256": "5e45ac7839ccb74153aea217a86e3b78a8298cf4b7bb31d6f3f1ca5afb076566"
+        "sha256": "5e45ac7839ccb74153aea217a86e3b78a8298cf4b7bb31d6f3f1ca5afb076566",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/aztks/SKILL.reference.md"
       }
     ]
   },
@@ -44,17 +50,20 @@
       {
         "installed_path": ".agents/skills/goal-setting/SKILL.md",
         "source_path": ".agents/skills/goal-setting/SKILL.md",
-        "sha256": "ef96149f5b95154fa001a930394989fbbf68d12fd648c462f079a14a5c2109ab"
+        "sha256": "ef96149f5b95154fa001a930394989fbbf68d12fd648c462f079a14a5c2109ab",
+        "archived_path": "third-party/installed-baseline/.agents/skills/goal-setting/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/skills/goal-setting/SKILL.md",
         "source_path": ".claude/skills/goal-setting/SKILL.md",
-        "sha256": "9576c780bbbdb8ac52fcbb21abac1231ed6db8391d7e0b6fdf04d4d4214e9a29"
+        "sha256": "9576c780bbbdb8ac52fcbb21abac1231ed6db8391d7e0b6fdf04d4d4214e9a29",
+        "archived_path": "third-party/installed-baseline/.claude/skills/goal-setting/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/skills/goal-setting/SKILL.md",
         "source_path": ".cursor/skills/goal-setting/SKILL.md",
-        "sha256": "4f17600ef74fb7c98cdd2e464c29f5f671f3d068ebe72ed026a5d8a37bfdbbb8"
+        "sha256": "4f17600ef74fb7c98cdd2e464c29f5f671f3d068ebe72ed026a5d8a37bfdbbb8",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/goal-setting/SKILL.reference.md"
       }
     ]
   },
@@ -66,17 +75,20 @@
       {
         "installed_path": ".agents/skills/grip-it/SKILL.md",
         "source_path": ".cursor/skills/grip-it/SKILL.md",
-        "sha256": "1ba35474fe40de27c1d259ee269565f269f281f4165360b351c406ed8181422d"
+        "sha256": "1ba35474fe40de27c1d259ee269565f269f281f4165360b351c406ed8181422d",
+        "archived_path": "third-party/installed-baseline/.agents/skills/grip-it/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/skills/grip-it/SKILL.md",
         "source_path": ".cursor/skills/grip-it/SKILL.md",
-        "sha256": "1ba35474fe40de27c1d259ee269565f269f281f4165360b351c406ed8181422d"
+        "sha256": "1ba35474fe40de27c1d259ee269565f269f281f4165360b351c406ed8181422d",
+        "archived_path": "third-party/installed-baseline/.claude/skills/grip-it/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/skills/grip-it/SKILL.md",
         "source_path": ".cursor/skills/grip-it/SKILL.md",
-        "sha256": "1ba35474fe40de27c1d259ee269565f269f281f4165360b351c406ed8181422d"
+        "sha256": "1ba35474fe40de27c1d259ee269565f269f281f4165360b351c406ed8181422d",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/grip-it/SKILL.reference.md"
       }
     ]
   },
@@ -88,17 +100,20 @@
       {
         "installed_path": ".agents/skills/merge-review/SKILL.md",
         "source_path": ".agents/skills/merge-review/SKILL.md",
-        "sha256": "ce16d74402450cf723fedfd5c33c64d63cb95c937b3fbb902dc729e3333a15d7"
+        "sha256": "ce16d74402450cf723fedfd5c33c64d63cb95c937b3fbb902dc729e3333a15d7",
+        "archived_path": "third-party/installed-baseline/.agents/skills/merge-review/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/skills/merge-review/SKILL.md",
         "source_path": ".claude/skills/merge-review/SKILL.md",
-        "sha256": "64c616384f920411df2ad8a74889def1044189a6e93eea6e58ae28eb1067ae9f"
+        "sha256": "64c616384f920411df2ad8a74889def1044189a6e93eea6e58ae28eb1067ae9f",
+        "archived_path": "third-party/installed-baseline/.claude/skills/merge-review/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/skills/merge-review/SKILL.md",
         "source_path": ".cursor/skills/merge-review/SKILL.md",
-        "sha256": "c78f8d0da6899b169219a7e3d6816fdad5ced695e88087f6dc1de66167b752ae"
+        "sha256": "c78f8d0da6899b169219a7e3d6816fdad5ced695e88087f6dc1de66167b752ae",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/merge-review/SKILL.reference.md"
       }
     ]
   },
@@ -110,62 +125,74 @@
       {
         "installed_path": ".agents/skills/notion-export/SKILL.md",
         "source_path": ".agents/skills/notion-export/SKILL.md",
-        "sha256": "10505befff47d2007d861180a64501ef3ca20bb9e44e5205338328b9f38995b2"
+        "sha256": "10505befff47d2007d861180a64501ef3ca20bb9e44e5205338328b9f38995b2",
+        "archived_path": "third-party/installed-baseline/.agents/skills/notion-export/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/skills/notion-export/SKILL.md",
         "source_path": ".claude/skills/notion-export/SKILL.md",
-        "sha256": "b062a3c42540f09ac389a42f620a6bd5f5acd886d563790259898e10a4f2a220"
+        "sha256": "b062a3c42540f09ac389a42f620a6bd5f5acd886d563790259898e10a4f2a220",
+        "archived_path": "third-party/installed-baseline/.claude/skills/notion-export/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/skills/notion-export/SKILL.md",
         "source_path": ".cursor/skills/notion-export/SKILL.md",
-        "sha256": "f19de8dbe2e0af9dce01077082ecc8f7b65276fdeaa941a7e3fc7a27b4e89c83"
+        "sha256": "f19de8dbe2e0af9dce01077082ecc8f7b65276fdeaa941a7e3fc7a27b4e89c83",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/notion-export/SKILL.reference.md"
       },
       {
         "installed_path": "scripts/download_notion_page.py",
         "source_path": "scripts/download_notion_page.py",
-        "sha256": "21869383c08b59a481399c9e542556cf0257f99cf9940396ce57e0024af378a2"
+        "sha256": "21869383c08b59a481399c9e542556cf0257f99cf9940396ce57e0024af378a2",
+        "archived_path": "third-party/installed-baseline/scripts/download_notion_page.py"
       },
       {
         "installed_path": "scripts/save_notion_export_cookies.sh",
         "source_path": "scripts/save_notion_export_cookies.sh",
-        "sha256": "1e76327be8dc63d2a2d03647cccc1b810343e92640c9f305e2872c86593db546"
+        "sha256": "1e76327be8dc63d2a2d03647cccc1b810343e92640c9f305e2872c86593db546",
+        "archived_path": "third-party/installed-baseline/scripts/save_notion_export_cookies.sh"
       },
       {
         "installed_path": "scripts/check_token_v2_block_access.py",
         "source_path": "scripts/check_token_v2_block_access.py",
-        "sha256": "9aa421166608052d56d7ffe7ca759abb3b9b656013521a87a5059867e5ff4e2d"
+        "sha256": "9aa421166608052d56d7ffe7ca759abb3b9b656013521a87a5059867e5ff4e2d",
+        "archived_path": "third-party/installed-baseline/scripts/check_token_v2_block_access.py"
       },
       {
         "installed_path": "scripts/check_notion_asset_auth.py",
         "source_path": "scripts/check_notion_asset_auth.py",
-        "sha256": "cf392522c00aaaa5dd81a96d9708fab0dd2627d157381ab22bf54e38b5ee7378"
+        "sha256": "cf392522c00aaaa5dd81a96d9708fab0dd2627d157381ab22bf54e38b5ee7378",
+        "archived_path": "third-party/installed-baseline/scripts/check_notion_asset_auth.py"
       },
       {
         "installed_path": "scripts/backup_with_token_v2.sh",
         "source_path": "scripts/backup_with_token_v2.sh",
-        "sha256": "133b340d4101ae73bf4d5c045c705618582a6688c3e90c4da2efdc444b698308"
+        "sha256": "133b340d4101ae73bf4d5c045c705618582a6688c3e90c4da2efdc444b698308",
+        "archived_path": "third-party/installed-baseline/scripts/backup_with_token_v2.sh"
       },
       {
         "installed_path": "scripts/notion_export_secrets.sh",
         "source_path": "scripts/notion_export_secrets.sh",
-        "sha256": "526beb347a6c12a0ad7a22a724329dde7d109709704ec384fec90e23cda93fec"
+        "sha256": "526beb347a6c12a0ad7a22a724329dde7d109709704ec384fec90e23cda93fec",
+        "archived_path": "third-party/installed-baseline/scripts/notion_export_secrets.sh"
       },
       {
         "installed_path": "scripts/check_token_v2_access.sh",
         "source_path": "scripts/check_token_v2_access.sh",
-        "sha256": "29b91f0aa973ba918a817bf9f9de9c23bb49af961570d5a3185cb942218a9430"
+        "sha256": "29b91f0aa973ba918a817bf9f9de9c23bb49af961570d5a3185cb942218a9430",
+        "archived_path": "third-party/installed-baseline/scripts/check_token_v2_access.sh"
       },
       {
         "installed_path": "scripts/export_with_token_v2.sh",
         "source_path": "scripts/export_with_token_v2.sh",
-        "sha256": "39524ef02fd7e1c2360cf2d2e00415954b7ea87fb0df06fd3d9e3ac8e5bc9830"
+        "sha256": "39524ef02fd7e1c2360cf2d2e00415954b7ea87fb0df06fd3d9e3ac8e5bc9830",
+        "archived_path": "third-party/installed-baseline/scripts/export_with_token_v2.sh"
       },
       {
         "installed_path": "scripts/export_notion_zip_token_v2.py",
         "source_path": "scripts/export_notion_zip_token_v2.py",
-        "sha256": "0dcdbf90c9b9f679d90f2e6abd31076c8f02d4aab664cddf5cc17d5f2161727b"
+        "sha256": "0dcdbf90c9b9f679d90f2e6abd31076c8f02d4aab664cddf5cc17d5f2161727b",
+        "archived_path": "third-party/installed-baseline/scripts/export_notion_zip_token_v2.py"
       }
     ]
   },
@@ -177,42 +204,50 @@
       {
         "installed_path": ".agents/agents/playboard-integrity.md",
         "source_path": ".cursor/agents/playboard-integrity.md",
-        "sha256": "8577a88ffa5c1adf066841072b712b66b1c78db6412dbdf84b0c54b5c8645685"
+        "sha256": "8577a88ffa5c1adf066841072b712b66b1c78db6412dbdf84b0c54b5c8645685",
+        "archived_path": "third-party/installed-baseline/.agents/agents/playboard-integrity.md"
       },
       {
         "installed_path": ".agents/skills/playboard/SKILL.md",
         "source_path": ".agents/skills/playboard/SKILL.md",
-        "sha256": "3370a321238ca2247a470830e2843b99af1fd05ababcfb3b3e1b93d7305b21ef"
+        "sha256": "3370a321238ca2247a470830e2843b99af1fd05ababcfb3b3e1b93d7305b21ef",
+        "archived_path": "third-party/installed-baseline/.agents/skills/playboard/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/agents/playboard-integrity.md",
         "source_path": ".claude/agents/playboard-integrity.md",
-        "sha256": "53da15bb2f5d805910dc406658e13844f80567eed40a0a858413fe6ba2d9eb79"
+        "sha256": "53da15bb2f5d805910dc406658e13844f80567eed40a0a858413fe6ba2d9eb79",
+        "archived_path": "third-party/installed-baseline/.claude/agents/playboard-integrity.md"
       },
       {
         "installed_path": ".claude/skills/playboard/SKILL.md",
         "source_path": ".claude/skills/playboard/SKILL.md",
-        "sha256": "4fc29f1281794bb0baabad2552dea9ecdee519ace7f32fc3a796d84ec6ecee9e"
+        "sha256": "4fc29f1281794bb0baabad2552dea9ecdee519ace7f32fc3a796d84ec6ecee9e",
+        "archived_path": "third-party/installed-baseline/.claude/skills/playboard/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/agents/playboard-integrity.md",
         "source_path": ".cursor/agents/playboard-integrity.md",
-        "sha256": "8577a88ffa5c1adf066841072b712b66b1c78db6412dbdf84b0c54b5c8645685"
+        "sha256": "8577a88ffa5c1adf066841072b712b66b1c78db6412dbdf84b0c54b5c8645685",
+        "archived_path": "third-party/installed-baseline/.cursor/agents/playboard-integrity.md"
       },
       {
         "installed_path": ".cursor/skills/playboard/SKILL.md",
         "source_path": ".cursor/skills/playboard/SKILL.md",
-        "sha256": "cfaf5dfacf0313a508101062e6c24129d6cb931583b40eaacfaceb947ad2932c"
+        "sha256": "cfaf5dfacf0313a508101062e6c24129d6cb931583b40eaacfaceb947ad2932c",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/playboard/SKILL.reference.md"
       },
       {
         "installed_path": "reference/PLAYBOARD_BENEFIT_N_OPERATION_RULE.md",
         "source_path": "reference/PLAYBOARD_BENEFIT_N_OPERATION_RULE.md",
-        "sha256": "9c91c7ce0fd30eb913984536f768b0cde6b7286cbc755162623b27552472b1c6"
+        "sha256": "9c91c7ce0fd30eb913984536f768b0cde6b7286cbc755162623b27552472b1c6",
+        "archived_path": "third-party/installed-baseline/reference/PLAYBOARD_BENEFIT_N_OPERATION_RULE.md"
       },
       {
         "installed_path": "reference/PLAYBOARD_FINAL_SPEC_DEFINITION.md",
         "source_path": "reference/PLAYBOARD_FINAL_SPEC_DEFINITION.md",
-        "sha256": "9594faf89c50e2f1c9e996a74196b526ec8e5a3f9d0a0fd519f4a584e9af3140"
+        "sha256": "9594faf89c50e2f1c9e996a74196b526ec8e5a3f9d0a0fd519f4a584e9af3140",
+        "archived_path": "third-party/installed-baseline/reference/PLAYBOARD_FINAL_SPEC_DEFINITION.md"
       }
     ]
   },
@@ -224,17 +259,20 @@
       {
         "installed_path": ".agents/skills/profile-sum/SKILL.md",
         "source_path": ".agents/skills/profile-sum/SKILL.md",
-        "sha256": "24d5e073a6f85b60681f700ec7839918ae35977f0929cc1704e72697ca79590a"
+        "sha256": "24d5e073a6f85b60681f700ec7839918ae35977f0929cc1704e72697ca79590a",
+        "archived_path": "third-party/installed-baseline/.agents/skills/profile-sum/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/skills/profile-sum/SKILL.md",
         "source_path": ".claude/skills/profile-sum/SKILL.md",
-        "sha256": "29ab1b05636992fe380d837768e65dc268cb94e7ddbd87d8e353c89a55ff9eee"
+        "sha256": "29ab1b05636992fe380d837768e65dc268cb94e7ddbd87d8e353c89a55ff9eee",
+        "archived_path": "third-party/installed-baseline/.claude/skills/profile-sum/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/skills/profile-sum/SKILL.md",
         "source_path": ".cursor/skills/profile-sum/SKILL.md",
-        "sha256": "63588366c71247062c3a1594c79441786cb4a18b660fd6a146f6ceb150f3e1ae"
+        "sha256": "63588366c71247062c3a1594c79441786cb4a18b660fd6a146f6ceb150f3e1ae",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/profile-sum/SKILL.reference.md"
       }
     ]
   },
@@ -246,17 +284,20 @@
       {
         "installed_path": ".agents/skills/review-merge/SKILL.md",
         "source_path": ".agents/skills/review-merge/SKILL.md",
-        "sha256": "b36df4e9e5810f5c17cf50d3bedb0832e362ea2c17df276cf3c59d7e2b3ff7a9"
+        "sha256": "b36df4e9e5810f5c17cf50d3bedb0832e362ea2c17df276cf3c59d7e2b3ff7a9",
+        "archived_path": "third-party/installed-baseline/.agents/skills/review-merge/SKILL.reference.md"
       },
       {
         "installed_path": ".claude/skills/review-merge/SKILL.md",
         "source_path": ".claude/skills/review-merge/SKILL.md",
-        "sha256": "2f78e64f4fc20e2f66a728e68944c7bb91d5742974e1c075016dd0a76fc0ac0c"
+        "sha256": "2f78e64f4fc20e2f66a728e68944c7bb91d5742974e1c075016dd0a76fc0ac0c",
+        "archived_path": "third-party/installed-baseline/.claude/skills/review-merge/SKILL.reference.md"
       },
       {
         "installed_path": ".cursor/skills/review-merge/SKILL.md",
         "source_path": ".cursor/skills/review-merge/SKILL.md",
-        "sha256": "4673189306c7de66872a493e73c29824b1dbfe70c803bb46e45f350774578096"
+        "sha256": "4673189306c7de66872a493e73c29824b1dbfe70c803bb46e45f350774578096",
+        "archived_path": "third-party/installed-baseline/.cursor/skills/review-merge/SKILL.reference.md"
       }
     ]
   }
