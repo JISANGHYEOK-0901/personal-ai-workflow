@@ -6,9 +6,10 @@
 
 - [공통 원칙](workflow/CORE.md): AZTKS를 기본 작성·검증 과정에 반영. 별도 호출이나 매번 평가표가 필요하지 않다.
 - [execute](skills/execute/SKILL.md): 목표·미정 결정·실행·영향 추적·검증·종료. 다중 언어·서비스는 필요한 때만 추가 참조를 읽는다.
+- [pr-lifecycle](skills/pr-lifecycle/SKILL.md): PR 생성·검토·승인된 머지·base 동기화·로컬/원격 작업 브랜치 정리.
 - [프로젝트 설정](PROJECT.md) / [설정 템플릿](templates/PROJECT.md): 실제 경로·검증·Git·한도를 환경별로 정의한다.
 - [작업 기록 정책](docs/WORKLOG_POLICY.md): 작업 ID별 갱신, 월별 폴더. ai-input 전체는 항상 Git 제외.
-- [스킬 정리 내역](docs/SKILL_INVENTORY.md): 원본 8개 스킬과 에이전트는 비활성 보관하고 활성 경로에는 execute만 둔다.
+- [스킬 정리 내역](docs/SKILL_INVENTORY.md): 원본 8개 스킬과 에이전트는 비활성 보관하고 활성 경로에는 execute와 pr-lifecycle을 둔다.
 
 ## 관리
 

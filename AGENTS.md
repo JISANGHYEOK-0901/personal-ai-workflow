@@ -8,3 +8,5 @@
 - 활성 스킬 정본은 `skills/`다. 도구별 `skills/` 사본은 `python3 scripts/sync_skills.py --write`로 갱신하며 직접 수정하지 않는다.
 - `third-party/installed-baseline/`의 스킬·에이전트·스크립트는 비교·복원용 비활성 자료다.
 - 도입 대상 프로젝트의 기존 지침을 덮어쓰지 말고 해당 지침에 연결한다. 이 저장소의 설정을 다른 프로젝트의 실행 명령으로 사용하지 않는다.
+
+- PR 생성·검토·머지·머지 후 정리는 `skills/pr-lifecycle/SKILL.md`를 읽고 적용한다. 머지 후 일회성 작업 브랜치 정리까지 확인한다.
