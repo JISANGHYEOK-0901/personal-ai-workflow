@@ -1,8 +1,8 @@
 # 이 저장소의 프로젝트 설정
 
 - 목적: 규모·언어와 무관하게 재사용할 개인 AI 작업 템플릿·스킬셋 개발.
-- 범위: 공통 원칙, 선택형 스킬, 프로젝트 설정 템플릿, 기록 정책, 도구별 설치본.
-- 제외: 다른 업무 저장소 변경, 실제 연구 실험, 원본 전문 스크립트 실행.
+- 범위: 공통 원칙, 선택형 스킬, 프로젝트 설정 템플릿, 기록 정책, 도구별 설치본, 로컬 Workflow Lab과 실험 준비물.
+- 제외: 다른 업무 저장소 변경, 미승인 유료 반복 실험·외부 배포, 원본 전문 스크립트 실행.
 - 구조: `workflow/` 공통 원칙, `skills/` 활성 스킬 정본, `templates/` 도입용 설정, `docs/` 정책·설계·검증, `third-party/` 출처·비활성 원본.
 - 검증: 저장소 루트에서 `python3 scripts/sync_skills.py --check`, `git diff --check`, `python3 scripts/check_integrity.py`, `python3 -m unittest discover -s tests -p '*.py'`. 출처 보존은 sources.json의 archived_path와 sha256 대조. 스킬 행동 검증은 docs/VALIDATION.md의 실측 범위를 따른다.
 - 실행 환경: 동기화 스크립트는 Python 3 표준 라이브러리만 사용. 실제 PHP·Next.js·Spring 애플리케이션은 이 저장소에 없음. `src/Main.java`는 기존 미추적 IDE 샘플이며 템플릿 검증 대상이 아님.
