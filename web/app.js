@@ -1,5 +1,5 @@
 'use strict';
-// Entirely fictional, curated summaries; never fetch raw ai-input or local logs.
+// Demo runs are fictional. The local case report is loaded separately below.
 const steps = ['수정 정확성', '검증 수행', '변경 검토', 'PR·머지', '브랜치 정리', '범위 보존'];
 const runs = [
   {id: 'DEMO-A', condition: 'A', title: '빈 입력 오류 수정', label: '최소 지침', minutes: 9, interventions: 1,
@@ -46,3 +46,32 @@ function render() {
 }
 document.querySelector('#condition').addEventListener('change', render);
 render();
+
+async function loadCaseStudy() {
+  const status = document.querySelector('#case-status');
+  const content = document.querySelector('#case-content');
+  const retry = document.querySelector('#case-retry');
+  content.hidden = true;
+  retry.hidden = true;
+  document.querySelector('#case-report').textContent = '';
+  status.textContent = '로컬 보고서를 확인하고 있습니다.';
+  try {
+    const response = await fetch('/local-case-study', {cache: 'no-store'});
+    if (!response.ok) {
+      status.textContent = response.status === 404
+        ? '이 환경에는 로컬 사례 보고서가 없습니다. 가상 데모는 계속 볼 수 있습니다.'
+        : '보고서를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.';
+      retry.hidden = false;
+      return;
+    }
+    // Treat the report as plain text, never execute Markdown or embedded HTML.
+    document.querySelector('#case-report').textContent = await response.text();
+    status.textContent = '로컬 준비 기록입니다. 성능 비교 결과나 비용 절감 증거로 해석하지 않습니다.';
+    content.hidden = false;
+  } catch {
+    status.textContent = '로컬 서버에 연결할 수 없습니다. 서버 실행 상태를 확인해 주세요.';
+    retry.hidden = false;
+  }
+}
+document.querySelector('#case-retry').addEventListener('click', loadCaseStudy);
+loadCaseStudy();
