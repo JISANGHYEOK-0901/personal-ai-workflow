@@ -31,8 +31,14 @@ git diff --check
 
 ## 설계와 후속 작업
 
-[설계 초안](docs/PERSONAL_WORKFLOW_DRAFT.md), [규칙 30개·검증 사례](docs/RULE_ADOPTION_CATALOG.md)를 바탕으로 첫 구현을 만들었다. PR·상황판·백업·프로필은 필요할 때 개인화해 확장한다. AI 대학원 준비 프로젝트의 구체 연구 주제는 미정이다.
+[설계 초안](docs/PERSONAL_WORKFLOW_DRAFT.md), [규칙 30개·검증 사례](docs/RULE_ADOPTION_CATALOG.md)를 바탕으로 첫 구현을 만들었다. PR·상황판·백업·프로필은 필요할 때 개인화해 확장한다. AI 대학원 준비 프로젝트는 개발 작업 누락·재확인 문제와 개선 효과 검증에서 시작한다.
 
 ## 외부 자료
 
 원본은 third-party/installed-baseline에 보존했다. [출처 기록](third-party/sources.json)에 원래 경로·보관 경로·커밋·해시가 있으며, MIT 라이선스는 third-party/licenses에 유지한다. 원본을 현재 실행 지침으로 사용하지 않는다.
+
+## 첫 행동 실험
+
+[EXP-001 실험 계획](docs/experiments/EXP-001-pr-lifecycle.md): 동일 조건에서 pr-lifecycle 적용 전·후 PR 완료 단계 누락을 비교한다. 로컬 웹 데모와 fixture·정확성 평가기를 준비했다. 실제 AI 행동 실험은 미실행이다.
+
+[Workflow Lab 실행 안내](docs/WORKFLOW_LAB.md): `python3 scripts/serve_lab.py` 실행 후 http://127.0.0.1:8765 에서 확인한다. 모든 화면 사례는 가상 데이터다.
