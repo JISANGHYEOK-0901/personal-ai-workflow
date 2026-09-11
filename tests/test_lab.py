@@ -38,7 +38,7 @@ class LabTests(unittest.TestCase):
         root = f'http://127.0.0.1:{server.server_port}'
         try:
             with urlopen(root) as response:
-                self.assertIn('DEMO', response.read().decode())
+                self.assertIn('가상', response.read().decode())
             for path in ('/ai-input/worklog/', '/../AGENTS.md', '/%2e%2e/AGENTS.md', '/.git/config', '/unknown'):
                 with self.subTest(path=path), self.assertRaises(HTTPError) as error:
                     urlopen(root + path)
@@ -48,3 +48,40 @@ class LabTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_local_report_is_exact_plain_text_and_missing_or_symlink_is_not_served(self):
+        preview = load('case_preview', 'scripts/serve_lab.py')
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder).resolve() / 'report.md'
+            preview.CASE_REPORT = report
+            server = ThreadingHTTPServer(('127.0.0.1', 0), preview.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f'http://127.0.0.1:{server.server_port}/local-case-study'
+            try:
+                for mode in ('missing', 'regular', 'symlink', 'parent-symlink'):
+                    if mode == 'regular':
+                        report.write_text('<script>alert(1)</script>\n개인 사례')
+                        with urlopen(url) as response:
+                            self.assertEqual(response.headers.get_content_type(), 'text/plain')
+                            self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                            self.assertEqual(response.read(), report.read_bytes())
+                    else:
+                        if mode == 'symlink':
+                            report.unlink()
+                            report.symlink_to(ROOT / 'AGENTS.md')
+                        if mode == 'parent-symlink':
+                            target = Path(folder).resolve() / 'target'
+                            target.mkdir()
+                            (target / 'report.md').write_text('must not be served')
+                            alias = Path(folder).resolve() / 'alias'
+                            alias.symlink_to(target, target_is_directory=True)
+                            preview.CASE_REPORT = alias / 'report.md'
+                        with self.assertRaises(HTTPError) as error:
+                            urlopen(url)
+                        self.assertEqual(error.exception.code, 404)
+                        error.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
