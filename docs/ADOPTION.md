@@ -10,6 +10,15 @@
 4. 필요한 도구의 execute·pr-lifecycle 설치본을 만든다. 공통 정본만 수정하고 사본을 동기화한다. scripts/sync_skills.py는 전용으로 관리하는 세 도구 스킬 폴더를 가정하며, 기존 다른 스킬이 있으면 보존하고 중단한다. 기존 프로젝트에서는 그 스킬을 지우지 말고 해당 개인 스킬 폴더만 검토해 갱신한다.
 5. ai-input/ 전체 ignore를 설정하고 이미 추적된 파일이 있는지 확인한다. 추적된 개인 파일은 로컬 데이터를 보존하며 별도 범위를 정해 Git 추적을 정리한다. 다른 저장소의 이력을 자동 수정하지 않는다.
 
+## 연결 후 확인
+
+- Codex의 프로젝트 `AGENTS.md`에서 공통 지침 경로와 여러 단계 작업의 execute 진입 경로를 연결한다. 스킬 목록에 이름이 보이는 것과 본문을 읽는 것은 별개다.
+- Claude Code는 기존 `CLAUDE.md`를 보존하며 `@AGENTS.md`, `@workflow/CORE.md` 등 실제 경로의 import를 추가한다. 일반 문장이나 백틱 안의 경로는 자동 import가 아니다. 프로젝트 설정·기록 정책도 필요한 정본을 직접 연결한다.
+- 설치를 마친 새 세션에서 스킬 이름을 직접 호출하지 않는 대표 작업으로 확인한다. 파일 읽기/스킬 호출 흔적과 요구한 행동·산출물을 따로 확인한다. "적용했다"는 선언이나 사본 일치만으로 행동 검증을 통과시키지 않는다.
+- 이 저장소의 연결은 다른 프로젝트나 사용자 전역 설정에 자동으로 전파되지 않는다. 대상 프로젝트의 경로·설정·실제 세션을 확인하기 전에는 전체 도구 적용 완료로 보고하지 않는다.
+
+근거: [Codex 지침 탐색](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [스킬의 선택적 본문 로딩](https://learn.chatgpt.com/docs/build-skills), [Claude 파일 import](https://code.claude.com/docs/en/memory#import-additional-files).
+
 보관 원본·개인 worklog·src/Main.java 샘플은 도입 대상이 아니다. 일반 템플릿 도입을 배포·계정 접근 권한으로 취급하지 않는다.
 
 ## 규모·스택 적응 사례
