@@ -37,3 +37,9 @@ ai-input/
 # Python validation cache
 __pycache__/
 *.py[cod]
+
+# Local communication hooks and private state
+/ai-input/
+/.workflow-hooks/
+/.codex/hooks.json
+/.claude/settings.local.json
