@@ -21,6 +21,10 @@
 
 보관 원본·개인 worklog·src/Main.java 샘플은 도입 대상이 아니다. 일반 템플릿 도입을 배포·계정 접근 권한으로 취급하지 않는다.
 
+## 선택형 전달 점검 훅
+
+중요 영향·미결사항을 사용자 질문 뒤에 설명하는 문제가 관찰되면 [전달 점검 훅](COMMUNICATION_HOOKS.md)을 선택 설치할 수 있다. `python3 scripts/install_communication_hooks.py --target /path/to/workspace --write`는 Codex와 Claude Code에 같은 상기 로직을 연결하며 기존 설정·다른 훅을 보존한다. 기본 스킬 동기화와 별도다. 설치 후 두 도구의 새 세션에서 `/hooks`를 확인하고 Codex의 새 정의 신뢰 절차를 완료한다. 설치·정합성·활성화·실제 행동 효과를 각각 확인한다.
+
 ## 규모·스택 적응 사례
 
 | 상황 | 적용 깊이 |
