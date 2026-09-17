@@ -131,6 +131,10 @@ class CommunicationTests(unittest.TestCase):
             self.assertEqual(HOOK.shell_kind(cmd), 'release', cmd)
         self.assertEqual(HOOK.shell_events('git push && gh pr create --base develop')[1]['action'],
                          'create')
+        merge = HOOK.shell_events(
+            'gh pr merge 17 --merge --match-head-commit=0123456789abcdef')[1]
+        self.assertEqual((merge['action'], merge['pr_number'], merge['match_head']),
+                         ('merge', '17', '0123456789abcdef'))
         for cmd in ('echo "git push origin main"', 'rg "gh pr merge" docs',
                     'git push --dry-run', 'git -C FE status',
                     'python3 -c "print(\'railway up\')"',
@@ -216,6 +220,64 @@ class CommunicationTests(unittest.TestCase):
                             tool_input={'command': 'git push origin feature'})
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('Base, HEAD', result['hookSpecificOutput']['permissionDecisionReason'])
+
+    def test_pr_merge_binds_number_remote_shas_match_head_and_ci(self):
+        repo = self.feature_repo()
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        base_sha = self.git(repo, 'rev-parse', 'main')
+        head_sha = receipt['head']
+
+        def merge(command):
+            return self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                              tool_input={'command': command})
+
+        missing_number = merge('gh pr merge --merge --match-head-commit ' + head_sha)
+        self.assertEqual(missing_number['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('numeric PR number',
+                      missing_number['hookSpecificOutput']['permissionDecisionReason'])
+        missing_match = merge('gh pr merge 17 --merge')
+        self.assertEqual(missing_match['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('--match-head-commit',
+                      missing_match['hookSpecificOutput']['permissionDecisionReason'])
+
+        remote = {'number': 17, 'state': 'OPEN', 'isDraft': False,
+                  'baseRefName': 'main', 'baseRefOid': base_sha,
+                  'headRefName': 'feature', 'headRefOid': head_sha,
+                  'mergeable': 'MERGEABLE', 'mergeStateStatus': 'CLEAN',
+                  'statusCheckRollup': [
+                      {'status': 'COMPLETED', 'conclusion': 'SUCCESS'}],
+                  'url': 'https://example.invalid/pull/17'}
+        command = 'gh pr merge 17 --merge --match-head-commit ' + head_sha
+        with patch.object(HOOK, 'remote_pr_state', return_value=remote) as query:
+            allowed = merge(command)
+        query.assert_called_once_with(repo.resolve(), '17')
+        self.assertNotEqual(allowed.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+
+        pending = {**remote, 'statusCheckRollup': [{'status': 'IN_PROGRESS'}]}
+        with patch.object(HOOK, 'remote_pr_state', return_value=pending):
+            blocked = merge(command)
+        self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('pending CI', blocked['hookSpecificOutput']['permissionDecisionReason'])
+
+        wrong_head = {**remote, 'headRefOid': '0' * 40}
+        with patch.object(HOOK, 'remote_pr_state', return_value=wrong_head):
+            blocked = merge(command)
+        self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('remote PR head SHA',
+                      blocked['hookSpecificOutput']['permissionDecisionReason'])
+
+        wrong_base_branch = {**remote, 'baseRefName': 'release'}
+        with patch.object(HOOK, 'remote_pr_state', return_value=wrong_base_branch):
+            blocked = merge(command)
+        self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('base branch', blocked['hookSpecificOutput']['permissionDecisionReason'])
+
+        failed = {**remote, 'statusCheckRollup': [
+            {'status': 'COMPLETED', 'conclusion': 'FAILURE'}]}
+        with patch.object(HOOK, 'remote_pr_state', return_value=failed):
+            blocked = merge(command)
+        self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('unsuccessful CI', blocked['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_parallel_events_only_emit_one_reminder_and_one_review(self):
         def call(_):

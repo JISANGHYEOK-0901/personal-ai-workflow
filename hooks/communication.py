@@ -47,7 +47,8 @@ PR_REVIEW = (
     '관련 미추적 상태를 확인하고 필요한 검증을 수행한다. 최종 커밋 뒤 tracked/index가 깨끗하고 '
     '현재 untracked 상태를 확인한 뒤 '
     'base/HEAD에 묶인 검토 증표를 기록해야 git push와 PR 생성·머지가 진행된다. MAJOR 또는 BLOCKER가 '
-    '남아 있으면 증표를 만들지 말고 먼저 해결한다. 경계 명령이 차단되면 사유에 표시된 기록 명령을 따른다.'
+    '남아 있으면 증표를 만들지 말고 먼저 해결한다. 머지는 명시 PR 번호와 검토 HEAD를 사용하고 원격 '
+    'base/head·CI가 증표와 일치해야 한다. 경계 명령이 차단되면 사유에 표시된 기록 명령을 따른다.'
 )
 MAX_INPUT = 2 * 1024 * 1024
 REVIEW_MAX_AGE = 24 * 60 * 60
@@ -161,16 +162,25 @@ def shell_events(command):
         if executable == 'gh' and gh_words[:2] in (['pr', 'create'], ['pr', 'merge']):
             kind = 'release'
             base = None
+            pr_number = None
+            match_head = None
+            if gh_words[1] == 'merge' and len(gh_words) > 2 and not gh_words[2].startswith('-'):
+                pr_number = gh_words[2]
             for index, word in enumerate(gh_words[2:], start=2):
                 if word == '--base' and index + 1 < len(gh_words):
                     base = gh_words[index + 1]
                 elif word.startswith('--base='):
                     base = word.split('=', 1)[1]
+                elif word == '--match-head-commit' and index + 1 < len(gh_words):
+                    match_head = gh_words[index + 1]
+                elif word.startswith('--match-head-commit='):
+                    match_head = word.split('=', 1)[1]
                 elif word in {'-R', '--repo'} or word.startswith('--repo='):
                     remote_repo = True
             if boundary is None or boundary['action'] == 'push':
                 boundary = {'action': gh_words[1], 'repo': active_cwd, 'base': base,
-                            'remote_repo': remote_repo}
+                            'remote_repo': remote_repo, 'pr_number': pr_number,
+                            'match_head': match_head}
         if executable == 'gh' and gh_words[:2] == ['release', 'create']:
             kind = 'release'
         if executable in {'railway', 'vercel', 'fly', 'flyctl', 'firebase', 'wrangler'}:
@@ -224,6 +234,75 @@ def git_output(repo, *args, allowed=(0,)):
     if result.returncode not in allowed:
         raise ValueError('Git state could not be verified')
     return result.stdout, result.returncode
+
+
+def remote_pr_state(repo, pr_number):
+    fields = ('number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,'
+              'mergeable,mergeStateStatus,statusCheckRollup,url')
+    environment = dict(os.environ)
+    environment['GH_PROMPT_DISABLED'] = '1'
+    result = subprocess.run(['gh', 'pr', 'view', str(pr_number), '--json', fields],
+                            cwd=repo, env=environment, capture_output=True, timeout=8,
+                            check=False)
+    if result.returncode:
+        raise ValueError('GitHub PR state could not be verified')
+    try:
+        state = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError('GitHub PR state returned invalid JSON') from exc
+    if not isinstance(state, dict):
+        raise ValueError('GitHub PR state returned an invalid shape')
+    return state
+
+
+def reviewed_base_name(repo, base_ref):
+    output, _ = git_output(repo, 'rev-parse', '--symbolic-full-name', '--verify',
+                           '--end-of-options', base_ref)
+    full_name = output.decode().strip()
+    if full_name.startswith('refs/heads/'):
+        return full_name.removeprefix('refs/heads/')
+    if full_name.startswith('refs/remotes/'):
+        parts = full_name.split('/', 3)
+        if len(parts) == 4 and parts[3]:
+            return parts[3]
+    raise ValueError('The reviewed base must identify a local or remote-tracking branch')
+
+
+def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha):
+    pr_number = boundary.get('pr_number')
+    if not isinstance(pr_number, str) or not pr_number.isdigit():
+        raise ValueError('gh pr merge requires an explicit numeric PR number')
+    if boundary.get('match_head') != head_sha:
+        raise ValueError('gh pr merge --match-head-commit must equal the reviewed HEAD')
+    state = remote_pr_state(repo, pr_number)
+    if state.get('number') != int(pr_number):
+        raise ValueError('GitHub returned a different PR number')
+    if state.get('state') != 'OPEN' or state.get('isDraft') is not False:
+        raise ValueError('The target PR is not an open non-draft PR')
+    if state.get('baseRefName') != reviewed_base_name(repo, base_ref):
+        raise ValueError('The remote PR base branch does not match the reviewed base')
+    if state.get('baseRefOid') != base_sha:
+        raise ValueError('The remote PR base SHA does not match the reviewed base')
+    if state.get('headRefOid') != head_sha:
+        raise ValueError('The remote PR head SHA does not match the reviewed HEAD')
+    if state.get('mergeable') != 'MERGEABLE':
+        raise ValueError('The remote PR is not currently mergeable')
+    checks = state.get('statusCheckRollup')
+    if not isinstance(checks, list):
+        raise ValueError('The remote PR CI state could not be read')
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ValueError('The remote PR CI state has an invalid shape')
+        status = str(check.get('status', '')).upper()
+        conclusion = str(check.get('conclusion', '')).upper()
+        context_state = str(check.get('state', '')).upper()
+        if status and status != 'COMPLETED':
+            raise ValueError('The remote PR still has pending CI checks')
+        if conclusion and conclusion not in {'SUCCESS', 'NEUTRAL', 'SKIPPED'}:
+            raise ValueError('The remote PR has unsuccessful CI checks')
+        if context_state and context_state not in {'SUCCESS', 'EXPECTED'}:
+            raise ValueError('The remote PR has incomplete or unsuccessful CI checks')
+    return state
 
 
 def resolve_repo(root, cwd, hint=None):
@@ -348,6 +427,8 @@ def check_review(root, cwd, boundary):
             raise ValueError('Base, HEAD, or working tree changed after review')
         if boundary.get('base') and commit_sha(repo, boundary['base']) != base_sha:
             raise ValueError('PR command base does not match the reviewed base')
+        if boundary['action'] == 'merge':
+            check_remote_pr(repo, boundary, base_ref, base_sha, head_sha)
         return None
     except (OSError, TypeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
         try:
@@ -360,7 +441,9 @@ def check_review(root, cwd, boundary):
             'PR diff review gate blocked this command: ' + reason + '. Fetch the actual base, read '
             'skills/pr-lifecycle/SKILL.md and skills/execute/references/decision-diff-review.md, '
             'review the complete base...HEAD diff and validation evidence, resolve MAJOR/BLOCKER findings, '
-            'then record the clean final state and retry:\n' + command)
+            'then record the clean final state. For merge, use an explicit PR number and '
+            '--match-head-commit with the reviewed full HEAD SHA after remote CI succeeds. Retry after:\n'
+            + command)
 
 
 def handle(payload, engine, root):

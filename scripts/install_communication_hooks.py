@@ -56,7 +56,7 @@ def definitions(root, engine, revision):
     result = {}
     for event in ('UserPromptSubmit', 'PreToolUse', 'Stop'):
         handler = {'type': 'command', 'command': command,
-                   'timeout': 10 if event == 'PreToolUse' else 3}
+                   'timeout': 20 if event == 'PreToolUse' else 3}
         if engine == 'codex' and event != 'Stop':
             handler['additionalContextLimit'] = 1200
         group = {'hooks': [handler]}

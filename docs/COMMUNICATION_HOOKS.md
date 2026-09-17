@@ -9,7 +9,7 @@
 | 이벤트 | 동작 | 반복·중단 제한 |
 |---|---|---|
 | UserPromptSubmit | 초기 조사 뒤 중요 영향·미결사항·권장안을 의존 실행 전에 사용자에게 전달하도록 상기 | 사용자 입력당 짧은 컨텍스트 1회. 단순 질문·국소 수정은 형식적 목록·질문 제외 |
-| PreToolUse | 직접 편집·외부 반영 상기. PR 요청 턴의 `git push`와 모든 직접 `gh pr create/merge`에서 검토 증표 확인 | 일반 상기는 종류별 1회. PR 증표 없음·만료·상태 변경·base 불일치는 해당 명령 거부 |
+| PreToolUse | 직접 편집·외부 반영 상기. PR 요청 턴의 `git push`와 모든 직접 `gh pr create/merge`에서 검토 증표 확인 | 일반 상기는 종류별 1회. 증표 불일치 또는 merge 대상 PR·원격 SHA·CI 미확인은 해당 명령 거부 |
 | Stop | 여러 코드 디렉터리 또는 데이터·API·배포 관련 변경 시도가 있으면 인계 내용 재점검 | 턴당 최대 1회 이어서 응답. stop_hook_active, 백그라운드 작업·예약 대기 때 재개하지 않음 |
 
 전달 대상은 미확인 사실뿐 아니라 **이미 확인됐지만 사용자의 선택을 바꾸는 영향**도 포함한다. 직접 조사할 사실은 조사하고, 실제 사용자 선택이 필요한 항목만 묶어 질문한다. 이미 받은 결정은 재사용한다. 알려진 중요 미결사항에 의존하는 후속 실행만 보류하며 독립 작업은 계속한다. 이 판단은 에이전트의 책임이고 훅이 기계적으로 집행하지 않는다.
@@ -36,6 +36,14 @@ python3 .workflow-hooks/communication.py \
 
 세 확인 플래그와 비음수 finding 개수가 필요하다. MAJOR 또는 BLOCKER가 1개 이상이면 pass 증표를 만들지 않는다. MINOR는 발견 개수로 기록할 수 있지만 허용 범위의 결함을 수정한 뒤 최종 diff를 다시 검토하는 스킬 계약은 그대로 적용된다. 증표는 repository path의 해시, base ref/SHA, HEAD SHA, merge-base, untracked 내용의 SHA-256, MINOR 개수, 시각만 로컬 SQLite에 저장한다. 24시간이 지나거나 base ref·HEAD·tracked/index·untracked 상태가 바뀌면 무효다. `gh pr create`는 검토한 base와 비교할 수 있도록 `--base`를 명시해야 한다. `gh --repo/-R`은 로컬 checkout과 원격 대상을 안전하게 결속할 수 없어 차단하며 검토한 저장소 디렉터리에서 실행한다.
 
+`gh pr merge`는 숫자 PR 번호와 검토한 전체 HEAD SHA를 모두 명시해야 한다.
+
+```bash
+gh pr merge 123 --merge --match-head-commit <reviewed-full-head-sha>
+```
+
+PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft·mergeable 상태, PR 번호, 원격 base 브랜치와 base/head SHA, 현재 CI rollup을 확인한다. 원격 base/head가 증표와 다르거나 CI가 pending·실패면 merge를 거부한다. CI가 하나도 설정되지 않은 저장소에서는 없는 검사를 통과로 꾸미지 않으며, 프로젝트 정책에 따라 별도로 미설정을 보고한다. 이 조회는 읽기 전용이지만 GitHub 인증·네트워크가 필요하고 조회 실패 시 merge만 fail closed다.
+
 Stop은 최종 답변의 특정 단어, ‘미결사항 없음’ 선언, 작업 기록 존재 여부를 통과 증거로 사용하지 않는다. 구조적으로 재점검할 때가 됐음을 알릴 뿐, 이미 설명한 작업도 한 번 더 검토될 수 있다. 이미 충분히 안내했다면 반복 설명·승인 요청·추가 테스트 없이 종료하도록 지시한다. Codex는 `decision: block`, Claude는 `hookSpecificOutput.additionalContext`로 동일한 1회 재점검을 요청한다. 새 응답이 추가될 수 있으므로 추가 지연이 0이라고 주장하지 않는다.
 
 ### 관찰하는 도구
@@ -46,7 +54,7 @@ Stop은 최종 답변의 특정 단어, ‘미결사항 없음’ 선언, 작업
 - 셸의 Python/Node/셸 스크립트 등은 내용이 불투명하므로 편집 상기만 제공한다. 인용된 예제 문자열이나 heredoc 본문을 배포 명령으로 해석하지 않는다.
 - 읽기 명령, 문서·이미지·테스트·개인 기록·도구 설정 파일만의 변경에는 종료 재점검을 추가하지 않는다.
 
-이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 웹에서 직접 만든 PR을 모두 포괄하지 않는다. `gh pr merge`가 지정한 원격 PR과 현재 로컬 checkout이 같은 head인지도 훅만으로 조회하지 않으므로 pr-lifecycle의 base/head 확인이 필요하다. 로컬 훅을 비활성화하거나 설정 신뢰를 해제하면 우회할 수 있다. 저장소 전체의 강제력이 필요하면 서버의 필수 CI·브랜치 보호를 함께 사용한다.
+이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 웹에서 직접 만든 PR을 모두 포괄하지 않는다. `gh pr merge`의 직접 경로는 원격 PR과 로컬 검토 증거를 결속하지만 조회와 실제 merge 사이의 경쟁을 원자적으로 막지는 못한다. `--match-head-commit`은 head 전진을 막고 base 경쟁은 서버 보호·머지 큐가 담당한다. 로컬 훅을 비활성화하거나 설정 신뢰를 해제하면 우회할 수 있으므로 저장소 전체 강제력에는 서버의 필수 CI·브랜치 보호를 함께 사용한다.
 
 ## 설치·갱신·제거
 
@@ -77,11 +85,11 @@ python3 scripts/install_communication_hooks.py --target /path/to/workspace --rem
 
 ## 상태·비용·실패 처리
 
-별도 모델·네트워크 호출이나 대화 원문 수집은 없다. 세션 ID 해시, 턴 구분, 디렉터리 해시, 단계·점검 여부만 로컬 SQLite에 기록한다. 명령·프롬프트·답변·인증값·실제 경로를 기록하지 않는다. 14일 지난 항목은 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
+별도 모델 호출이나 대화 원문 수집은 없다. 일반 이벤트는 네트워크를 사용하지 않고, 직접 `gh pr merge`만 GitHub PR 상태를 한 번 읽는다. 세션 ID 해시, 턴 구분, 디렉터리 해시, 단계·점검 여부만 로컬 SQLite에 기록한다. 명령·프롬프트·답변·인증값·실제 경로를 기록하지 않는다. 14일 지난 항목은 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
 
 Codex는 turn_id를 사용하고 Claude는 UserPromptSubmit으로 입력 경계를 만든다. 경계가 없으면 이전 작업을 추정해 Stop을 재개하지 않는다. 서브에이전트 전용 훅은 등록하지 않으며 모든 병렬·서브에이전트 상황의 동등성은 미검증이다.
 
-입력 오류·과대 입력·해시 불일치 같은 일반 전달 알림 오류는 내용을 출력하지 않고 짧은 경고와 빈 JSON으로 종료한다. 알림 실패 때문에 작업을 막지 않는다. 반면 직접 PR 경계로 식별한 명령에서 repository·base·증표를 검증할 수 없으면 그 명령만 fail closed로 거부한다. 일반 이벤트 timeout은 3초, Git 상태를 읽는 PreToolUse는 10초다. 모델 컨텍스트 추가와 조건부 Stop 재개에 따른 비용·지연은 별개로 측정한다.
+입력 오류·과대 입력·해시 불일치 같은 일반 전달 알림 오류는 내용을 출력하지 않고 짧은 경고와 빈 JSON으로 종료한다. 알림 실패 때문에 작업을 막지 않는다. 반면 직접 PR 경계로 식별한 명령에서 repository·base·증표 또는 원격 PR 상태를 검증할 수 없으면 그 명령만 fail closed로 거부한다. 일반 이벤트 timeout은 3초, Git 상태와 원격 PR을 읽는 PreToolUse는 20초다. 모델 컨텍스트 추가와 조건부 Stop 재개에 따른 비용·지연은 별개로 측정한다.
 
 ## 검증과 시범 성공 기준
 
@@ -89,7 +97,7 @@ Codex는 turn_id를 사용하고 Claude는 UserPromptSubmit으로 입력 경계�
 python3 -m unittest discover -s tests -p 'test_communication_hooks.py' -v
 ```
 
-합성 이벤트 검사는 양쪽 출력 계약, 반복·턴/세션 격리, 읽기·국소 작업 제외, 팝업 사례의 FE/BE 변경 후 1회 재점검, 실제 전달 여부를 키워드로 판정하지 않음, 설치 보존·복구·제거·하위 cwd·경로 인용을 확인한다. 격리 Git 저장소에서는 PR 입력 뒤 push 차단, 명시 base 없는 PR 생성 차단, tracked/index가 clean인 최종 상태 기록 후 허용, base 전진·후속 tracked/untracked 수정 무효화, MAJOR/BLOCKER 기록 거부를 확인한다. 실제 LLM의 의미 판단 품질을 증명하는 검사는 아니다.
+합성 이벤트 검사는 양쪽 출력 계약, 반복·턴/세션 격리, 읽기·국소 작업 제외, 팝업 사례의 FE/BE 변경 후 1회 재점검, 실제 전달 여부를 키워드로 판정하지 않음, 설치 보존·복구·제거·하위 cwd·경로 인용을 확인한다. 격리 Git 저장소에서는 PR 입력 뒤 push 차단, 명시 base 없는 PR 생성 차단, tracked/index가 clean인 최종 상태 기록 후 허용, base 전진·후속 tracked/untracked 수정 무효화, MAJOR/BLOCKER 기록 거부를 확인한다. merge에서는 숫자 PR 번호·`--match-head-commit`, 원격 base 브랜치·base/head SHA와 CI 성공이 모두 일치할 때만 허용하는 합성 응답을 검사한다. 실제 LLM의 의미 판단 품질이나 GitHub 경쟁의 원자적 차단을 증명하는 검사는 아니다.
 
 새 세션의 실제 작업에서는 다음을 관찰한다. 스킬 이름 선언이나 worklog 작성만으로 통과시키지 않는다.
 
