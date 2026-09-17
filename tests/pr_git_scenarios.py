@@ -89,6 +89,21 @@ class GitScenarios(unittest.TestCase):
         result = self.run_git('merge-base', '--is-ancestor', base0, 'HEAD', success=False)
         self.assertEqual(result.returncode, 1)
 
+    def test_one_diff_view_misses_other_worktree_states(self):
+        (self.repo / 'staged.txt').write_text('staged change')
+        self.run_git('add', 'staged.txt')
+        (self.repo / 'consumer.txt').write_text('unstaged change')
+        (self.repo / 'untracked.txt').write_text('untracked change')
+
+        unstaged = self.run_git('diff', '--name-only').stdout.splitlines()
+        staged = self.run_git('diff', '--cached', '--name-only').stdout.splitlines()
+        status = self.run_git('status', '--short').stdout
+
+        self.assertEqual(unstaged, ['consumer.txt'])
+        self.assertEqual(staged, ['staged.txt'])
+        self.assertIn('?? untracked.txt', status)
+        self.assertNotIn('untracked.txt', unstaged + staged)
+
 
 if __name__ == '__main__':
     unittest.main()

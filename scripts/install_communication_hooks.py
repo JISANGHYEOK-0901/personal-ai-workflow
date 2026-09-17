@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the optional communication pilot for Codex and Claude in one workspace."""
+"""Install communication reminders and the PR review gate in one workspace."""
 import argparse
 import copy
 import hashlib
@@ -55,7 +55,8 @@ def definitions(root, engine, revision):
                           '--root', str(root), '--revision', revision])
     result = {}
     for event in ('UserPromptSubmit', 'PreToolUse', 'Stop'):
-        handler = {'type': 'command', 'command': command, 'timeout': 3}
+        handler = {'type': 'command', 'command': command,
+                   'timeout': 10 if event == 'PreToolUse' else 3}
         if engine == 'codex' and event != 'Stop':
             handler['additionalContextLimit'] = 1200
         group = {'hooks': [handler]}

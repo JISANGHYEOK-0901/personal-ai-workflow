@@ -5,11 +5,11 @@
 ## 현재 구현 v0.1
 
 - [공통 원칙](workflow/CORE.md): AZTKS를 기본 작성·검증 과정에 반영. 별도 호출이나 매번 평가표가 필요하지 않다.
-- [execute](skills/execute/SKILL.md): 목표·미정 결정·실행·영향 추적·검증·종료. 다중 언어·서비스는 필요한 때만 추가 참조를 읽는다.
-- [pr-lifecycle](skills/pr-lifecycle/SKILL.md): PR 생성·검토·승인된 머지·base 동기화·로컬/원격 작업 브랜치 정리. 동시 작업과 base/head 전진 시 검토·검증 기준을 재확인한다.
+- [execute](skills/execute/SKILL.md): 목표·미정 결정·실행·영향 추적·검증·종료. 사실·MINOR·MAJOR·BLOCKER를 구분하고 변경 작업의 최종 diff를 의미적으로 검토한다.
+- [pr-lifecycle](skills/pr-lifecycle/SKILL.md): PR 생성·검토·승인된 머지·base 동기화·로컬/원격 작업 브랜치 정리. 공통 diff 게이트를 적용하고 동시 작업과 base/head 전진 시 검토·검증 기준을 재확인한다.
 - [프로젝트 설정](PROJECT.md) / [설정 템플릿](templates/PROJECT.md): 실제 경로·검증·Git·한도를 환경별로 정의한다.
 - [작업 기록 정책](docs/WORKLOG_POLICY.md): 작업 ID별 갱신, 월별 폴더. ai-input 전체는 항상 Git 제외.
-- [전달 점검 훅 시범 적용](docs/COMMUNICATION_HOOKS.md): Codex·Claude에서 중요 영향·미결사항·권장안의 안내 시점을 상기. 선택 설치하며 반복 승인이나 매 도구별 모델 호출을 추가하지 않는다.
+- [전달 점검과 PR diff 검토 훅](docs/COMMUNICATION_HOOKS.md): Codex·Claude에서 중요 영향 안내를 상기하고, PR 요청에는 검토 컨텍스트를 주입한다. 현재 base/HEAD에 묶인 증표가 없으면 직접 push·PR 생성·머지 경계를 차단한다.
 - [스킬 정리 내역](docs/SKILL_INVENTORY.md): 원본 8개 스킬과 에이전트는 비활성 보관하고 활성 경로에는 execute와 pr-lifecycle을 둔다.
 
 ## 관리

@@ -1,6 +1,6 @@
-# 중요한 사항 전달 점검 훅 — 시범 적용
+# 전달 점검과 PR diff 검토 게이트
 
-스킬을 읽고 검증·기록을 충실하게 수행해도, 기존 데이터 전환 영향과 권장안을 사용자 질문 뒤에 설명한 사례가 있었다. 이 훅은 **설명이 필요한 시점에 다시 점검하도록 상기**한다. 설명 내용의 정확성·충분성이나 사용자 승인 여부를 자동 판정하지 않는다.
+스킬을 읽고 검증·기록을 충실하게 수행해도, 기존 데이터 전환 영향과 권장안을 사용자 질문 뒤에 설명한 사례가 있었다. 전달 점검은 **설명이 필요한 시점에 다시 점검하도록 상기**한다. 추가로 PR 요청이 있을 때 의미적 diff 검토를 자동으로 시작하도록 컨텍스트를 주입하고, 현재 Git 상태에 묶인 검토 증표가 없으면 직접 PR 경계 명령을 거부한다. 훅은 검토 내용의 정확성 자체를 판정하지 않고 구조화된 수행과 최신 상태만 강제한다.
 
 공통 정본은 [hooks/communication.py](../hooks/communication.py), 설치 도구는 [install_communication_hooks.py](../scripts/install_communication_hooks.py)다. Python 3.9 이상 표준 라이브러리만 사용한다. Codex와 Claude Code가 같은 점검 문구·분류·반복 제한을 사용하며, 플랫폼별 출력 형식만 구분한다. 스킬 정본·기존 프로젝트 지침은 그대로 적용한다.
 
@@ -9,12 +9,32 @@
 | 이벤트 | 동작 | 반복·중단 제한 |
 |---|---|---|
 | UserPromptSubmit | 초기 조사 뒤 중요 영향·미결사항·권장안을 의존 실행 전에 사용자에게 전달하도록 상기 | 사용자 입력당 짧은 컨텍스트 1회. 단순 질문·국소 수정은 형식적 목록·질문 제외 |
-| PreToolUse | 직접 편집이나 대표 외부 반영 명령에 점검 컨텍스트 추가 | 같은 턴의 편집/외부 반영 종류별 1회. 도구를 거절·승인·변조하지 않음 |
+| PreToolUse | 직접 편집·외부 반영 상기. PR 요청 턴의 `git push`와 모든 직접 `gh pr create/merge`에서 검토 증표 확인 | 일반 상기는 종류별 1회. PR 증표 없음·만료·상태 변경·base 불일치는 해당 명령 거부 |
 | Stop | 여러 코드 디렉터리 또는 데이터·API·배포 관련 변경 시도가 있으면 인계 내용 재점검 | 턴당 최대 1회 이어서 응답. stop_hook_active, 백그라운드 작업·예약 대기 때 재개하지 않음 |
 
 전달 대상은 미확인 사실뿐 아니라 **이미 확인됐지만 사용자의 선택을 바꾸는 영향**도 포함한다. 직접 조사할 사실은 조사하고, 실제 사용자 선택이 필요한 항목만 묶어 질문한다. 이미 받은 결정은 재사용한다. 알려진 중요 미결사항에 의존하는 후속 실행만 보류하며 독립 작업은 계속한다. 이 판단은 에이전트의 책임이고 훅이 기계적으로 집행하지 않는다.
 
-PreToolUse의 컨텍스트는 다음 모델 요청에서 읽힐 수 있으므로 **현재 요청된 도구 실행 전 설명을 보장하지 않는다**. 시작 훅이 사전 안내를 요구하고, 실행 훅은 다음 의존 실행을 점검하도록 보완한다. 누락을 확실히 막는 강제 게이트로 표현하지 않는다.
+일반 PreToolUse 컨텍스트는 다음 모델 요청에서 읽힐 수 있으므로 **현재 요청된 도구 실행 전 설명을 보장하지 않는다**. 시작 훅이 사전 안내를 요구하고, 실행 훅은 다음 의존 실행을 점검하도록 보완한다. PR 경계는 별도 `permissionDecision: deny`를 사용하므로 해당 직접 명령은 검토 증표 없이는 실행되지 않는다.
+
+### PR diff 검토 증표
+
+`PR해줘`, `PR 만들어줘`, `pull request create`처럼 PR 대상과 실행 의도가 함께 있는 입력은 해당 턴의 push 게이트를 활성화한다. 표현을 놓쳐도 직접 `gh pr create`와 `gh pr merge`는 항상 게이트를 거친다. 차단 사유는 `pr-lifecycle`과 `decision-diff-review`를 읽고 전체 `base...HEAD` diff, 요구·기결정 연결, 계약·데이터·인증·설정·배포 영향, 검증 증거를 확인한 뒤 실행할 기록 명령을 제공한다.
+
+기록은 최종 커밋 뒤 tracked 파일과 index가 clean인 상태에서 수행한다. 기존 untracked 파일은 내용 fingerprint에 포함해 이후 변화가 있으면 증표를 무효화한다. 실제 base를 먼저 fetch하고 remote-tracking ref 또는 확인한 SHA를 `--base`로 사용한다.
+
+```bash
+python3 .workflow-hooks/communication.py \
+  --root /path/to/workspace \
+  --record-pr-review \
+  --repo /path/to/workspace/repository \
+  --base origin/develop \
+  --requirements-reviewed \
+  --contracts-reviewed \
+  --validation-reviewed \
+  --major 0 --blocker 0 --minor 0
+```
+
+세 확인 플래그와 비음수 finding 개수가 필요하다. MAJOR 또는 BLOCKER가 1개 이상이면 pass 증표를 만들지 않는다. MINOR는 발견 개수로 기록할 수 있지만 허용 범위의 결함을 수정한 뒤 최종 diff를 다시 검토하는 스킬 계약은 그대로 적용된다. 증표는 repository path의 해시, base ref/SHA, HEAD SHA, merge-base, untracked 내용의 SHA-256, MINOR 개수, 시각만 로컬 SQLite에 저장한다. 24시간이 지나거나 base ref·HEAD·tracked/index·untracked 상태가 바뀌면 무효다. `gh pr create`는 검토한 base와 비교할 수 있도록 `--base`를 명시해야 한다. `gh --repo/-R`은 로컬 checkout과 원격 대상을 안전하게 결속할 수 없어 차단하며 검토한 저장소 디렉터리에서 실행한다.
 
 Stop은 최종 답변의 특정 단어, ‘미결사항 없음’ 선언, 작업 기록 존재 여부를 통과 증거로 사용하지 않는다. 구조적으로 재점검할 때가 됐음을 알릴 뿐, 이미 설명한 작업도 한 번 더 검토될 수 있다. 이미 충분히 안내했다면 반복 설명·승인 요청·추가 테스트 없이 종료하도록 지시한다. Codex는 `decision: block`, Claude는 `hookSpecificOutput.additionalContext`로 동일한 1회 재점검을 요청한다. 새 응답이 추가될 수 있으므로 추가 지연이 0이라고 주장하지 않는다.
 
@@ -22,11 +42,11 @@ Stop은 최종 답변의 특정 단어, ‘미결사항 없음’ 선언, 작업
 
 - Codex apply_patch의 Add/Update/Delete/Move 경로, Claude Edit/Write/MultiEdit의 file_path.
 - 코드 경로의 서로 다른 부모 디렉터리 2개 이상, `.sql`, migrations/schema/api/contracts/bridge 디렉터리는 종료 재점검의 구조적 단서다. 크기·파일 수로 품질을 판정하지 않는다.
-- `git push`(dry-run 제외), `gh pr merge`, `gh release create`, Railway/Vercel/Fly/Firebase/Wrangler의 대표 배포 명령, `npm/pnpm/yarn run deploy`.
+- `git push`(dry-run 제외), `gh pr create`, `gh pr merge`, `gh release create`, Railway/Vercel/Fly/Firebase/Wrangler의 대표 배포 명령, `npm/pnpm/yarn run deploy`.
 - 셸의 Python/Node/셸 스크립트 등은 내용이 불투명하므로 편집 상기만 제공한다. 인용된 예제 문자열이나 heredoc 본문을 배포 명령으로 해석하지 않는다.
 - 읽기 명령, 문서·이미지·테스트·개인 기록·도구 설정 파일만의 변경에는 종료 재점검을 추가하지 않는다.
 
-이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 한 파일에 숨어 있는 복잡한 동작 변경을 모두 포괄하지 않는다. 경로가 달라도 실제 영향은 작을 수 있다. 후속 실사용에서 놓친 사례·불필요한 재점검을 근거로 범위를 조정한다.
+이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 웹에서 직접 만든 PR을 모두 포괄하지 않는다. `gh pr merge`가 지정한 원격 PR과 현재 로컬 checkout이 같은 head인지도 훅만으로 조회하지 않으므로 pr-lifecycle의 base/head 확인이 필요하다. 로컬 훅을 비활성화하거나 설정 신뢰를 해제하면 우회할 수 있다. 저장소 전체의 강제력이 필요하면 서버의 필수 CI·브랜치 보호를 함께 사용한다.
 
 ## 설치·갱신·제거
 
@@ -45,7 +65,7 @@ python3 scripts/install_communication_hooks.py --target /path/to/workspace --rem
 - `.workflow-hooks/communication.py`, `.workflow-hooks/install.json`: 공유 로직의 로컬 사본·소유 정보.
 - `.codex/hooks.json`: Codex 이벤트 3개.
 - `.claude/settings.local.json`: Claude Code 이벤트 3개. 별도의 `.claude/hooks.json`은 사용하지 않는다.
-- `ai-input/hook-state/communication.sqlite3`: 반복 억제용 최소 상태.
+- `ai-input/hook-state/communication.sqlite3`: 반복 억제와 PR 검토 증표의 최소 상태.
 
 설치기는 이 경로들을 작업공간 `.gitignore`에 추가한다. 절대 경로와 실행 중 Python 경로를 안전하게 인용하므로 공백·특수문자가 있는 경로에서도 실행되며, 작업공간이 Git 루트가 아닌 경우도 지원한다. 위치 이동 또는 Python 제거 후에는 재설치한다. **하위 디렉터리에서 명령을 실행할 수 있는 것과 그 위치로 새 세션을 시작했을 때 설정이 발견되는 것은 별개**다. 기본 지원 진입점은 설치한 작업공간 루트다. 중첩 저장소에 자동으로 파일을 전파하지 않는다.
 
@@ -61,7 +81,7 @@ python3 scripts/install_communication_hooks.py --target /path/to/workspace --rem
 
 Codex는 turn_id를 사용하고 Claude는 UserPromptSubmit으로 입력 경계를 만든다. 경계가 없으면 이전 작업을 추정해 Stop을 재개하지 않는다. 서브에이전트 전용 훅은 등록하지 않으며 모든 병렬·서브에이전트 상황의 동등성은 미검증이다.
 
-입력 오류·과대 입력·상태 저장 실패·해시 불일치 때는 내용을 출력하지 않고 짧은 경고와 빈 JSON으로 종료한다. 알림 실패 때문에 작업을 막지 않는다. 훅 명령 timeout은 3초다. 모델 컨텍스트 추가와 조건부 Stop 재개에 따른 비용·지연은 별개로 측정한다.
+입력 오류·과대 입력·해시 불일치 같은 일반 전달 알림 오류는 내용을 출력하지 않고 짧은 경고와 빈 JSON으로 종료한다. 알림 실패 때문에 작업을 막지 않는다. 반면 직접 PR 경계로 식별한 명령에서 repository·base·증표를 검증할 수 없으면 그 명령만 fail closed로 거부한다. 일반 이벤트 timeout은 3초, Git 상태를 읽는 PreToolUse는 10초다. 모델 컨텍스트 추가와 조건부 Stop 재개에 따른 비용·지연은 별개로 측정한다.
 
 ## 검증과 시범 성공 기준
 
@@ -69,7 +89,7 @@ Codex는 turn_id를 사용하고 Claude는 UserPromptSubmit으로 입력 경계�
 python3 -m unittest discover -s tests -p 'test_communication_hooks.py' -v
 ```
 
-합성 이벤트 검사는 양쪽 출력 계약, 반복·턴/세션 격리, 읽기·국소 작업 제외, 팝업 사례의 FE/BE 변경 후 1회 재점검, 실제 전달 여부를 키워드로 판정하지 않음, 설치 보존·복구·제거·하위 cwd·경로 인용을 확인한다. 실제 LLM 대화의 개선 효과를 증명하는 검사는 아니다.
+합성 이벤트 검사는 양쪽 출력 계약, 반복·턴/세션 격리, 읽기·국소 작업 제외, 팝업 사례의 FE/BE 변경 후 1회 재점검, 실제 전달 여부를 키워드로 판정하지 않음, 설치 보존·복구·제거·하위 cwd·경로 인용을 확인한다. 격리 Git 저장소에서는 PR 입력 뒤 push 차단, 명시 base 없는 PR 생성 차단, tracked/index가 clean인 최종 상태 기록 후 허용, base 전진·후속 tracked/untracked 수정 무효화, MAJOR/BLOCKER 기록 거부를 확인한다. 실제 LLM의 의미 판단 품질을 증명하는 검사는 아니다.
 
 새 세션의 실제 작업에서는 다음을 관찰한다. 스킬 이름 선언이나 worklog 작성만으로 통과시키지 않는다.
 

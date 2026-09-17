@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,24 @@ class CommunicationTests(unittest.TestCase):
 
     def stop(self, engine='codex', **fields):
         return self.event('Stop', engine, last_assistant_message='작업 기록에 남겼습니다.', **fields)
+
+    def git(self, repo, *args):
+        return subprocess.run(['git', '-C', str(repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def feature_repo(self):
+        repo = self.root / 'app'
+        repo.mkdir()
+        self.git(repo, 'init', '-q', '-b', 'main')
+        self.git(repo, 'config', 'user.name', 'Hook Test')
+        self.git(repo, 'config', 'user.email', 'hook@example.invalid')
+        (repo / 'app.txt').write_text('base\n')
+        self.git(repo, 'add', 'app.txt')
+        self.git(repo, 'commit', '-q', '-m', 'base')
+        self.git(repo, 'checkout', '-q', '-b', 'feature')
+        (repo / 'app.txt').write_text('feature\n')
+        self.git(repo, 'commit', '-qam', 'feature')
+        return repo
 
     def test_read_only_and_single_local_edit_do_not_continue(self):
         for engine in ('codex', 'claude'):
@@ -106,8 +125,12 @@ class CommunicationTests(unittest.TestCase):
 
     def test_release_detected_but_examples_and_dry_runs_are_not(self):
         for cmd in ('git -C FE push origin feature', 'npm test && gh pr merge 1 --merge',
+                    'gh pr create --base develop', 'cd FE && gh pr create --base develop',
+                    'gh --repo owner/repo pr create --base develop',
                     'env FOO=bar railway up', 'vercel --prod'):
             self.assertEqual(HOOK.shell_kind(cmd), 'release', cmd)
+        self.assertEqual(HOOK.shell_events('git push && gh pr create --base develop')[1]['action'],
+                         'create')
         for cmd in ('echo "git push origin main"', 'rg "gh pr merge" docs',
                     'git push --dry-run', 'git -C FE status',
                     'python3 -c "print(\'railway up\')"',
@@ -121,6 +144,78 @@ class CommunicationTests(unittest.TestCase):
         self.assertNotIn('permissionDecision', result['hookSpecificOutput'])
         self.assertEqual(self.event('PreToolUse', **args), {})
         self.assertTrue(self.stop())
+
+    def test_pr_prompt_triggers_fresh_review_gate(self):
+        repo = self.feature_repo()
+        self.assertTrue(HOOK.pr_prompt('피알 만들어줘'))
+        start = self.event('UserPromptSubmit', prompt='이 변경 PR해줘')
+        self.assertIn('검토 증표', start['hookSpecificOutput']['additionalContext'])
+        push = {'tool_name': 'Bash', 'tool_input': {'command': 'git push origin feature'},
+                'cwd': str(repo)}
+        blocked = self.event('PreToolUse', **push)
+        self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('--record-pr-review', blocked['hookSpecificOutput']['permissionDecisionReason'])
+
+        (repo / 'local-note.txt').write_text('preserved untracked file\n')
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.assertEqual(receipt['minor'], 0)
+        state_bytes = (self.root / 'ai-input/hook-state/communication.sqlite3').read_bytes()
+        self.assertNotIn(b'preserved untracked file', state_bytes)
+        allowed = self.event('PreToolUse', **push)
+        self.assertNotEqual(allowed.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        create = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                            tool_input={'command': 'gh pr create --base main --title test'})
+        self.assertNotEqual(create.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+
+        (repo / 'local-note.txt').write_text('changed untracked file\n')
+        stale_untracked = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                                     tool_input={'command': 'gh pr create --base main --title test'})
+        self.assertEqual(stale_untracked['hookSpecificOutput']['permissionDecision'], 'deny')
+        (repo / 'local-note.txt').write_text('preserved untracked file\n')
+        (repo / 'app.txt').write_text('changed after review\n')
+        stale = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                           tool_input={'command': 'gh pr create --base main --title test'})
+        self.assertEqual(stale['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('Tracked files or index are not clean',
+                      stale['hookSpecificOutput']['permissionDecisionReason'])
+
+    def test_pr_create_always_requires_matching_explicit_base_and_clean_pass(self):
+        repo = self.feature_repo()
+        no_receipt = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                                tool_input={'command': 'gh pr create --base main'})
+        self.assertEqual(no_receipt['hookSpecificOutput']['permissionDecision'], 'deny')
+        with self.assertRaisesRegex(ValueError, 'MAJOR'):
+            HOOK.record_review(self.root, repo, 'main', True, True, True, major=1)
+        HOOK.record_review(self.root, repo, 'main', True, True, True, minor=2)
+        missing_base = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                                  tool_input={'command': 'gh pr create --title test'})
+        self.assertEqual(missing_base['hookSpecificOutput']['permissionDecision'], 'deny')
+        wrong_base = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                                tool_input={'command': 'gh pr create --base HEAD'})
+        self.assertEqual(wrong_base['hookSpecificOutput']['permissionDecision'], 'deny')
+        remote_repo = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                                 tool_input={'command':
+                                             'gh pr create --base main --repo owner/repository'})
+        self.assertEqual(remote_repo['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('without --repo/-R',
+                      remote_repo['hookSpecificOutput']['permissionDecisionReason'])
+
+        state = (self.root / 'ai-input/hook-state/communication.sqlite3').read_bytes()
+        self.assertNotIn(str(repo).encode(), state)
+
+    def test_base_advance_invalidates_receipt(self):
+        repo = self.feature_repo()
+        self.event('UserPromptSubmit', prompt='PR 만들어줘')
+        HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.git(repo, 'checkout', '-q', 'main')
+        (repo / 'base.txt').write_text('advanced\n')
+        self.git(repo, 'add', 'base.txt')
+        self.git(repo, 'commit', '-q', '-m', 'advance base')
+        self.git(repo, 'checkout', '-q', 'feature')
+        result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                            tool_input={'command': 'git push origin feature'})
+        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('Base, HEAD', result['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_parallel_events_only_emit_one_reminder_and_one_review(self):
         def call(_):
@@ -276,6 +371,48 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0)
             self.assertEqual(json.loads(run.stdout), {})
             self.assertNotIn('{invalid', run.stderr)
+
+    def test_installed_runtime_records_and_enforces_pr_review(self):
+        INSTALL.install(self.root, 'write')
+        repo = self.root / 'app'
+        repo.mkdir()
+        subprocess.run(['git', '-C', str(repo), 'init', '-q', '-b', 'main'], check=True)
+        subprocess.run(['git', '-C', str(repo), 'config', 'user.name', 'Hook Test'], check=True)
+        subprocess.run(['git', '-C', str(repo), 'config', 'user.email', 'hook@example.invalid'], check=True)
+        (repo / 'app.txt').write_text('base\n')
+        subprocess.run(['git', '-C', str(repo), 'add', 'app.txt'], check=True)
+        subprocess.run(['git', '-C', str(repo), 'commit', '-q', '-m', 'base'], check=True)
+        subprocess.run(['git', '-C', str(repo), 'checkout', '-q', '-b', 'feature'], check=True)
+        (repo / 'app.txt').write_text('feature\n')
+        subprocess.run(['git', '-C', str(repo), 'commit', '-qam', 'feature'], check=True)
+
+        runtime = self.root / INSTALL.RUNTIME
+        record = subprocess.run([
+            sys.executable, str(runtime), '--root', str(self.root), '--record-pr-review',
+            '--repo', str(repo), '--base', 'main', '--requirements-reviewed',
+            '--contracts-reviewed', '--validation-reviewed', '--major', '0', '--minor', '0',
+            '--blocker', '0'], capture_output=True, text=True)
+        self.assertEqual(record.returncode, 0, record.stderr)
+        self.assertTrue(json.loads(record.stdout)['recorded'])
+
+        (repo / 'app.txt').write_text('dirty after receipt\n')
+        rejected = subprocess.run([
+            sys.executable, str(runtime), '--root', str(self.root), '--record-pr-review',
+            '--repo', str(repo), '--base', 'main', '--requirements-reviewed',
+            '--contracts-reviewed', '--validation-reviewed'], capture_output=True, text=True)
+        self.assertEqual(rejected.returncode, 2)
+        (repo / 'app.txt').write_text('feature\n')
+
+        config = json.loads((self.root / '.codex/hooks.json').read_text())
+        command = config['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        payload = {'hook_event_name': 'PreToolUse', 'session_id': 'test', 'turn_id': 'turn',
+                   'cwd': str(repo), 'tool_name': 'Bash',
+                   'tool_input': {'command': 'gh pr create --base main'}}
+        run = subprocess.run(command, shell=True, input=json.dumps(payload),
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotEqual(json.loads(run.stdout).get('hookSpecificOutput', {}).get(
+            'permissionDecision'), 'deny')
 
     def test_corrupt_state_and_changed_runtime_warn_without_blocking_or_leaking(self):
         INSTALL.install(self.root, 'write')
