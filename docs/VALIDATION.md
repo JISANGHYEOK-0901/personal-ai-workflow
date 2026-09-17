@@ -83,3 +83,17 @@
 - Claude Code 2.1.273: 프로젝트 로컬 설정과 출력 계약·직접 명령 실행 검사. `claude doctor`에서 설정 오류는 없었으며 동시 진단 중 한 곳에서 기존 keychain 항목 충돌 경고가 발생했다. 인증 설정은 수정하지 않았다. doctor 성공을 실제 훅 이벤트 실행의 증거로 취급하지 않는다.
 - 앱 저장소 6개의 HEAD·Git 상태·추적 diff 해시가 설치 전후 동일. hongcafeapp의 기존 로컬 워크플로 검사도 PASS. 개인 설치 파일과 상태·기록은 Git 제외.
 - **미검증:** 신뢰 활성화 후 양쪽 도구의 새 세션 실제 작업, 설명 시점 개선 효과·추가 응답/시간/토큰, 임의 셸/MCP·서브에이전트·모든 하위 Git 진입점. 별도 모델 호출·유료 반복 실험 없이 검증했다. 합성 이벤트 통과를 의미 판단이나 행동 개선의 입증으로 표시하지 않는다.
+
+## 결정 분류·의미적 diff 게이트 보완 (2026-09-17)
+
+- execute와 pr-lifecycle이 `skills/execute/references/decision-diff-review.md` 한 정본에서 확인 가능한 사실, MINOR, MAJOR, BLOCKER와 budget 경계를 사용하도록 연결했다. 변경 작업은 staged·unstaged·관련 미추적 파일을 포함한 최종 diff를 요구·기결정·계약 영향과 대조하며 테스트·CI·`git diff --check`로 의미 검토를 대신하지 않는다.
+- Git fixture에 단일 diff view가 staged·unstaged·untracked 상태 전체를 포함하지 못하는 사례를 추가했다. 전체 unittest 43개, 스킬 동기화·정합성·공백 검사 PASS. 시스템 Python의 PyYAML 부재로 quick_validate 첫 실행은 실패했고, 프로젝트 의존성을 변경하지 않은 임시 target에 PyYAML을 설치해 execute와 pr-lifecycle 모두 PASS했다.
+- 같은 스킬 정본과 세 도구 사본을 로컬 작업공간 `hongcafeapp`, `minjisuper`에 반영했다. 두 작업공간의 sync 검사와 hongcafeapp 로컬 워크플로 검사 PASS, 원본과 대상 파일 SHA-256 일치, 하위 앱 저장소 6개의 branch/status 무변경을 확인했다.
+- **미검증:** 새 세션의 실제 에이전트가 임의 변경 과제에서 모든 변경 원천을 읽고 의미적 결함을 분류하는 행동. 문서·파일 일치·Git fixture는 판단 품질이나 모든 작업에서의 준수를 증명하지 않는다. RULE_ADOPTION_CATALOG의 V01 보완 사례로 후속 관찰한다.
+
+## PR diff 검토 훅 게이트 승격 (2026-09-17)
+
+- UserPromptSubmit에서 PR 실행 의도를 감지해 diff 검토 기준을 컨텍스트로 주입하고, 해당 턴의 직접 `git push` 및 모든 직접 `gh pr create/merge`에 PreToolUse 검토 증표 게이트를 추가했다.
+- 격리 Git 저장소에서 증표 없음, `--base` 누락·불일치, MAJOR/BLOCKER 잔존, dirty tracked/index, base 전진, HEAD 이후 tracked/untracked 수정이 PR 경계를 차단하는지 검사한다. tracked/index가 clean인 최종 상태의 요구·계약·검증 확인과 base/HEAD 증표 뒤에는 같은 명령이 허용되는지 검사한다.
+- 증표는 경로 해시와 Git SHA·merge-base·untracked 내용 해시·MINOR 개수·시각만 Git 제외 SQLite에 보존하고 24시간 뒤 만료한다. 일반 전달 알림은 fail open을 유지하며, 직접 식별한 PR 경계의 증표 검증 오류만 fail closed다.
+- **한계:** 훅은 모델의 의미 판단 품질을 자동 평가하지 않는다. 임의 래퍼·MCP·기존 PTY·웹 PR, 비활성화된 로컬 훅을 완전히 막지 못하며, 원격 PR과 로컬 checkout의 동일성은 pr-lifecycle에서 별도로 확인한다. 서버 필수 체크·브랜치 보호는 아직 미설정이다.

@@ -16,7 +16,7 @@ git diff --check
 - 스킬 사본·리소스 일치와 미관리 파일 충돌 검사.
 - 활성 스킬 name/description 기본 형식, 로컬 Markdown 링크의 대상 존재 확인. 전체 YAML 스키마나 heading anchor·원격 URL 유효성 검사는 아니다.
 - 보관 파일 SHA-256·라이선스와 ai-input 추적 금지·ignore 동작 확인.
-- Git 경계 4개, 정합성 실패 주입 5개, 동기화 회귀 9개 실행.
+- Git 경계 5개, 정합성 실패 주입 5개, 동기화 회귀 9개 실행. Git 경계에는 단일 `git diff`가 staged·unstaged·untracked 상태 전체를 포함하지 않는 사례가 포함된다.
 
 보관 원본 문서의 링크는 과거 설치 구조를 참조하므로 현재 활성 문서 링크 검사에서 제외하며 내용 해시로 보존을 확인한다.
 

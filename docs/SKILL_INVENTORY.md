@@ -3,8 +3,8 @@
 ## 현재 기본 구성
 
 - `workflow/CORE.md`: 규모·언어와 무관한 공통 작성·검증·권한 기준. AZTKS 작성 기준이 기본 포함된다.
-- `skills/execute/`: 활성 실행 스킬 정본. 세 도구의 skills/execute 사본은 동기화 스크립트가 관리한다.
-- `skills/pr-lifecycle/`: PR 생성·검토·승인된 머지·작업 브랜치 정리의 활성 정본. 동시 작업·base/head 전진·검증 무효화·머지 경쟁은 references/concurrency.md로 연결.
+- `skills/execute/`: 활성 실행 스킬 정본. 사실·MINOR·MAJOR·BLOCKER 분류와 최종 의미적 diff 검토를 포함하며 세 도구 사본은 동기화 스크립트가 관리한다.
+- `skills/pr-lifecycle/`: PR 생성·검토·승인된 머지·작업 브랜치 정리의 활성 정본. execute의 공통 diff 게이트를 사용하고 동시 작업·base/head 전진·검증 무효화·머지 경쟁은 references/concurrency.md로 연결한다.
 - `PROJECT.md`: 이 저장소 설정. `templates/PROJECT.md`는 다른 프로젝트 도입용 양식.
 - `docs/WORKLOG_POLICY.md`: 기존 작업 단위 기록 정책. ai-input 전체는 로컬 유지.
 - 자동 하위 에이전트·전문 업무 스크립트는 기본 활성화하지 않는다.
@@ -14,8 +14,8 @@
 | 원본 | 현재 반영 | 후속 확장 |
 |---|---|---|
 | aztks | 5개 작성 기준을 CORE에 포함. 적용 선언·평가표 강제 제거 | 상세 평가 필요 시 별도 review로 발전 |
-| grip-it | execute의 중요 미정 목록·권장안·결정 재사용 | 복잡한 인터뷰가 반복되면 clarify 분리 |
-| goal-setting | execute의 목표·범위·검증·종료 한도 | 도구별 goal 명령 연결은 필요 시 |
+| grip-it | execute의 중요 미정 목록·권장안·결정 재사용과 MINOR/MAJOR/BLOCKER 분류 | 복잡한 인터뷰가 반복되면 clarify 분리 |
+| goal-setting | execute의 목표·범위·검증·종료 한도. budget은 권한이나 결정 등급을 바꾸지 않음 | 도구별 goal 명령 연결은 필요 시 |
 | review-merge | 공통 권한·영향 검증, 프로젝트별 Git 설정 원칙 | PR 수명주기는 pr-lifecycle로 활성화. 복잡한 스택 전용 구현은 후속 |
 | merge-review | 영역 간 통합 검증 원칙 | main 선머지는 기본 절차 아님 |
 | playboard | 공통 정본·중복 기록 방지 원칙 | 레지스트리·상황판 구축은 필요 시 |
