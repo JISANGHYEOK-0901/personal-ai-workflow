@@ -9,7 +9,7 @@
 - [pr-lifecycle](skills/pr-lifecycle/SKILL.md): PR 생성·검토·승인된 머지·base 동기화·로컬/원격 작업 브랜치 정리. 공통 diff 게이트를 적용하고 동시 작업과 base/head 전진 시 검토·검증 기준을 재확인한다.
 - [프로젝트 설정](PROJECT.md) / [설정 템플릿](templates/PROJECT.md): 실제 경로·검증·Git·한도를 환경별로 정의한다.
 - [작업 기록 정책](docs/WORKLOG_POLICY.md): 작업 ID별 갱신, 월별 폴더. ai-input 전체는 항상 Git 제외.
-- [전달 점검과 PR diff 검토 훅](docs/COMMUNICATION_HOOKS.md): Codex·Claude에서 중요 영향 안내를 상기하고, PR 요청에는 검토 컨텍스트를 주입한다. 현재 base/HEAD에 묶인 증표가 없으면 직접 push·PR 생성·머지 경계를 차단한다.
+- [전달 점검과 PR diff 검토 훅](docs/COMMUNICATION_HOOKS.md): Codex·Claude에서 중요 영향 안내를 상기하고, PR 요청에는 검토 컨텍스트를 주입한다. 현재 base/HEAD 증표가 없으면 직접 push·PR 경계를 차단하며, merge는 실제 원격 PR 번호·base/head·CI까지 대조한다.
 - [스킬 정리 내역](docs/SKILL_INVENTORY.md): 원본 8개 스킬과 에이전트는 비활성 보관하고 활성 경로에는 execute와 pr-lifecycle을 둔다.
 
 ## 관리

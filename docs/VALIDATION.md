@@ -97,3 +97,9 @@
 - 격리 Git 저장소에서 증표 없음, `--base` 누락·불일치, MAJOR/BLOCKER 잔존, dirty tracked/index, base 전진, HEAD 이후 tracked/untracked 수정이 PR 경계를 차단하는지 검사한다. tracked/index가 clean인 최종 상태의 요구·계약·검증 확인과 base/HEAD 증표 뒤에는 같은 명령이 허용되는지 검사한다.
 - 증표는 경로 해시와 Git SHA·merge-base·untracked 내용 해시·MINOR 개수·시각만 Git 제외 SQLite에 보존하고 24시간 뒤 만료한다. 일반 전달 알림은 fail open을 유지하며, 직접 식별한 PR 경계의 증표 검증 오류만 fail closed다.
 - **한계:** 훅은 모델의 의미 판단 품질을 자동 평가하지 않는다. 임의 래퍼·MCP·기존 PTY·웹 PR, 비활성화된 로컬 훅을 완전히 막지 못하며, 원격 PR과 로컬 checkout의 동일성은 pr-lifecycle에서 별도로 확인한다. 서버 필수 체크·브랜치 보호는 아직 미설정이다.
+
+## 원격 PR 신원 게이트 보완 (2026-09-17)
+
+- 직접 `gh pr merge`에 숫자 PR 번호와 검토한 전체 HEAD의 `--match-head-commit`을 요구한다. 실행 직전 읽기 전용 `gh pr view`로 OPEN·non-draft·mergeable 상태, 실제 번호, 원격 base 브랜치·base/head SHA와 CI rollup을 로컬 검토 증표에 대조한다.
+- 합성 원격 응답으로 번호·match-head 누락, 원격 base 브랜치·head SHA 불일치, pending·실패 CI를 차단하고 모든 값과 성공 CI가 일치할 때만 허용하는 회귀 검사를 추가했다. 실제 GitHub 조회 실패는 merge만 fail closed다.
+- **한계:** 조회와 merge 사이 base 경쟁은 원자적으로 차단되지 않는다. head는 GitHub의 `--match-head-commit` 조건을 사용하며 최신 base 통합 강제는 서버 필수 체크·브랜치 보호·머지 큐의 역할이다. 래퍼·MCP·웹 merge와 훅 비활성화는 로컬 게이트 범위 밖이다.
