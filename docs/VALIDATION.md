@@ -103,3 +103,14 @@
 - 직접 `gh pr merge`에 숫자 PR 번호와 검토한 전체 HEAD의 `--match-head-commit`을 요구한다. 실행 직전 읽기 전용 `gh pr view`로 OPEN·non-draft·mergeable 상태, 실제 번호, 원격 base 브랜치·base/head SHA와 CI rollup을 로컬 검토 증표에 대조한다.
 - 합성 원격 응답으로 번호·match-head 누락, 원격 base 브랜치·head SHA 불일치, pending·실패 CI를 차단하고 모든 값과 성공 CI가 일치할 때만 허용하는 회귀 검사를 추가했다. 실제 GitHub 조회 실패는 merge만 fail closed다.
 - **한계:** 조회와 merge 사이 base 경쟁은 원자적으로 차단되지 않는다. head는 GitHub의 `--match-head-commit` 조건을 사용하며 최신 base 통합 강제는 서버 필수 체크·브랜치 보호·머지 큐의 역할이다. 래퍼·MCP·웹 merge와 훅 비활성화는 로컬 게이트 범위 밖이다.
+
+## PR 게이트 감사 후 보완 (2026-09-18)
+
+- 기준은 develop `df7ad37eff67a495979bd6ae6eab45011567d193` 위 `fix/pr-hook-audit` 작업 변경이다. 일반 영향 안내를 CORE/execute에 반영하고 PR 스킬을 검토·최종 커밋·증표 → push·생성 순서로 정렬했다.
+- 직접 PR 경계를 단독 명령으로 제한하고, 증표에 remote identity와 head branch를 추가했다. 명령의 head·refspec·remote, gh가 선택한 저장소, 실제 원격 head SHA를 검토 상태와 대조한다. 원격/브랜치 정보가 없는 구형 증표는 재기록해야 한다. create의 base 이름은 검토한 원격 브랜치와 비교하여 로컬 base 지연의 오탐을 제거했다.
+- 머지 후 삭제는 PR diff 대신 별도 MERGED 증표를 사용한다. 같은 저장소의 원래 head SHA, merge commit의 fetch된 base 포함, 정확한 lease를 검증한다. 미병합·fork·다른 대상·누락된 lease·변경된 증거·만료를 거부한다.
+- 전체 unittest **66개 PASS**(기존 48개 + 새 회귀 18개). 설치된 런타임의 review/cleanup CLI 경로도 임시 저장소와 가짜 gh/git 읽기 응답으로 검증했다. 동기화·정합성·공백 검사 PASS. 임시 PyYAML 6.0.3 경로에서 두 스킬 quick_validate PASS; 프로젝트 의존성 변경 없음.
+- 독립 검토에서 발견한 검토 후 remote 주소 변경, 로컬/원격 head 차이, heredoc 뒤 명령, 삭제 옵션 축약·결합을 보완하고 해당 회귀를 포함했다. PR 직전 검토에서는 추적 설정에 따른 암시적 head 선택을 막도록 create의 현재 브랜치 `--head` 명시를 필수화하고 회귀를 추가했다. 최종 의미적 diff 검토에서 요청 범위·상태 이행·기존 사용자 파일 보존을 확인했다.
+- 실제 GitHub 읽기로 gh 선택 저장소·develop SHA 및 이미 MERGED인 PR #12의 새 JSON 필드를 확인했다. 설치된 런타임의 `cleanup_state`도 실제 PR #12와 fetch된 base에서 통과했다. 이 사전 검증은 읽기 전용으로 수행했으며 실제 PR 실행 결과는 해당 PR과 같은 작업 ID의 기록에 연결한다.
+- practice-skill·hongcafeapp·minjisuper에 설치하고 세 곳의 `--check`와 스킬 동기화 검사를 통과했다. 훅 런타임 SHA-256은 모두 `fcebb0ed55627b42b32ae2463ed5e152057827718f9f62d19b1d38e52cbb6c9d`이다. Codex `hooks/list`는 각 3개 이벤트, enabled=true, trustStatus=modified, 오류·경고 0으로 확인했다. 새 정의의 사용자 재신뢰 전 실제 Codex 적용은 대기 상태이며 신뢰 설정은 변경하지 않았다.
+- **한계:** 자동 검사는 합성 이벤트·Git 경계·설치 런타임의 증거이며 새 모델 세션의 판단 품질을 입증하지 않는다. PR 생성의 원격 조회 뒤 head가 바뀌는 경쟁, 임의 래퍼·웹·MCP와 비활성 훅은 여전히 범위 밖이다. merge는 `--match-head-commit`, 삭제는 정확한 SHA lease를 사용하며 서버 보호 미설정은 이번 작업에서 바꾸지 않았다.

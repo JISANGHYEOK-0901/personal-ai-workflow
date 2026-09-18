@@ -9,7 +9,7 @@
 | 이벤트 | 동작 | 반복·중단 제한 |
 |---|---|---|
 | UserPromptSubmit | 초기 조사 뒤 중요 영향·미결사항·권장안을 의존 실행 전에 사용자에게 전달하도록 상기 | 사용자 입력당 짧은 컨텍스트 1회. 단순 질문·국소 수정은 형식적 목록·질문 제외 |
-| PreToolUse | 직접 편집·외부 반영 상기. PR 요청 턴의 `git push`와 모든 직접 `gh pr create/merge`에서 검토 증표 확인 | 일반 상기는 종류별 1회. 증표 불일치 또는 merge 대상 PR·원격 SHA·CI 미확인은 해당 명령 거부 |
+| PreToolUse | 직접 편집·외부 반영 상기. PR 요청 턴의 일반 `git push`와 모든 직접 `gh pr create/merge`에서 검토 증표 확인. 삭제 push는 별도 정리 증표 확인 | 일반 상기는 종류별 1회. 증표·실제 대상·원격 상태를 확인하지 못하면 해당 명령 거부 |
 | Stop | 여러 코드 디렉터리 또는 데이터·API·배포 관련 변경 시도가 있으면 인계 내용 재점검 | 턴당 최대 1회 이어서 응답. stop_hook_active, 백그라운드 작업·예약 대기 때 재개하지 않음 |
 
 전달 대상은 미확인 사실뿐 아니라 **이미 확인됐지만 사용자의 선택을 바꾸는 영향**도 포함한다. 직접 조사할 사실은 조사하고, 실제 사용자 선택이 필요한 항목만 묶어 질문한다. 이미 받은 결정은 재사용한다. 알려진 중요 미결사항에 의존하는 후속 실행만 보류하며 독립 작업은 계속한다. 이 판단은 에이전트의 책임이고 훅이 기계적으로 집행하지 않는다.
@@ -20,7 +20,7 @@
 
 `PR해줘`, `PR 만들어줘`, `pull request create`처럼 PR 대상과 실행 의도가 함께 있는 입력은 해당 턴의 push 게이트를 활성화한다. 표현을 놓쳐도 직접 `gh pr create`와 `gh pr merge`는 항상 게이트를 거친다. 차단 사유는 `pr-lifecycle`과 `decision-diff-review`를 읽고 전체 `base...HEAD` diff, 요구·기결정 연결, 계약·데이터·인증·설정·배포 영향, 검증 증거를 확인한 뒤 실행할 기록 명령을 제공한다.
 
-기록은 최종 커밋 뒤 tracked 파일과 index가 clean인 상태에서 수행한다. 기존 untracked 파일은 내용 fingerprint에 포함해 이후 변화가 있으면 증표를 무효화한다. 실제 base를 먼저 fetch하고 remote-tracking ref 또는 확인한 SHA를 `--base`로 사용한다.
+기록은 최종 커밋 뒤 tracked 파일과 index가 clean인 상태에서 수행한다. 기존 untracked 파일은 내용 fingerprint에 포함해 이후 변화가 있으면 증표를 무효화한다. 실제 base를 먼저 fetch하고 브랜치를 식별하는 remote-tracking ref를 `--base`로 사용한다.
 
 ```bash
 python3 .workflow-hooks/communication.py \
@@ -34,7 +34,14 @@ python3 .workflow-hooks/communication.py \
   --major 0 --blocker 0 --minor 0
 ```
 
-세 확인 플래그와 비음수 finding 개수가 필요하다. MAJOR 또는 BLOCKER가 1개 이상이면 pass 증표를 만들지 않는다. MINOR는 발견 개수로 기록할 수 있지만 허용 범위의 결함을 수정한 뒤 최종 diff를 다시 검토하는 스킬 계약은 그대로 적용된다. 증표는 repository path의 해시, base ref/SHA, HEAD SHA, merge-base, untracked 내용의 SHA-256, MINOR 개수, 시각만 로컬 SQLite에 저장한다. 24시간이 지나거나 base ref·HEAD·tracked/index·untracked 상태가 바뀌면 무효다. `gh pr create`는 검토한 base와 비교할 수 있도록 `--base`를 명시해야 한다. `gh --repo/-R`은 로컬 checkout과 원격 대상을 안전하게 결속할 수 없어 차단하며 검토한 저장소 디렉터리에서 실행한다.
+세 확인 플래그와 비음수 finding 개수가 필요하다. MAJOR 또는 BLOCKER가 1개 이상이면 pass 증표를 만들지 않는다. MINOR는 발견 개수로 기록할 수 있지만 허용 범위의 결함을 수정한 뒤 최종 diff를 다시 검토하는 스킬 계약은 그대로 적용된다. 증표는 repository path의 해시, base ref/SHA, HEAD SHA, merge-base, untracked 내용의 SHA-256, remote 이름·저장소 식별 해시, MINOR 개수, 시각을 로컬 SQLite에 저장한다. 24시간이 지나거나 base ref·HEAD·tracked/index·untracked·원격 대상이 바뀌면 무효다. 원격 식별 정보가 없는 이전 형식의 증표는 갱신 후 다시 기록해야 한다.
+
+직접 PR 경계 명령은 **한 셸 호출에 하나씩** 실행한다. `git push ... && gh pr create ...`, `gh pr create ... && gh pr merge ...`뿐 아니라 checkout·cd·리다이렉션 등과 결합한 호출도 분리한다. 앞 명령이 검사한 Git 상태나 실행 대상을 바꾸는 문제를 피하기 위한 조건이다. 도구의 작업 디렉터리를 지정하거나 `git -C`를 사용하고, PR 본문은 `--body-file`로 전달한다. 인용된 제목·본문 안의 `&&`는 셸 결합이 아니다.
+
+- `gh pr create --base <브랜치>`는 검토한 base의 **브랜치 이름**과 대조한다. `origin/develop`을 검토했다면 `--base develop`을 쓰며, 로컬 develop이 뒤처졌다는 이유로 거부하지 않는다. freshness는 검토한 ref의 SHA로 확인한다.
+- `--head <현재 브랜치>`를 반드시 명시한다. 생략하면 gh가 추적 설정에 따라 다른 브랜치·fork를 선택할 수 있으므로 거부한다. 다른 브랜치는 그 checkout에서 다시 검토한다. 생성 전에 push를 끝내고, `gh repo view`가 선택한 저장소와 `git ls-remote`로 읽은 실제 원격 head SHA를 증표와 대조한다. 대상 조회 실패·미push·원격 head 불일치 시 생성하지 않는다.
+- 일반 push는 설정된 remote 이름과 단일 refspec을 명시한다. 예: `git push -u origin HEAD:refs/heads/feature`. source SHA가 검토 HEAD와 같고 목적지는 현재 작업 브랜치여야 하며 원격 대상이 증표와 일치해야 한다. 암시적 push·다중 ref·`--all`·`--tags` 등은 이 게이트의 지원 경로가 아니다.
+- `gh --repo/-R`의 분리형·붙임형, `GH_REPO` 등 대상에 영향을 주는 환경 지정, `git -c` 등 실행 환경 변경은 검토한 checkout과 대상을 일치시킬 수 없으면 거부한다. 명령 문자열의 환경 할당을 제거한 뒤 다른 대상으로 검사하지 않는다.
 
 `gh pr merge`는 숫자 PR 번호와 검토한 전체 HEAD SHA를 모두 명시해야 한다.
 
@@ -42,7 +49,27 @@ python3 .workflow-hooks/communication.py \
 gh pr merge 123 --merge --match-head-commit <reviewed-full-head-sha>
 ```
 
-PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft·mergeable 상태, PR 번호, 원격 base 브랜치와 base/head SHA, 현재 CI rollup을 확인한다. 원격 base/head가 증표와 다르거나 CI가 pending·실패면 merge를 거부한다. CI가 하나도 설정되지 않은 저장소에서는 없는 검사를 통과로 꾸미지 않으며, 프로젝트 정책에 따라 별도로 미설정을 보고한다. 이 조회는 읽기 전용이지만 GitHub 인증·네트워크가 필요하고 조회 실패 시 merge만 fail closed다.
+PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft·mergeable 상태, PR 번호, 저장소 식별값, 원격 base 브랜치와 base/head SHA, 현재 CI rollup을 확인한다. 원격 base/head가 증표와 다르거나 CI가 pending·실패면 merge를 거부한다. CI가 하나도 설정되지 않은 저장소에서는 없는 검사를 통과로 꾸미지 않으며, 프로젝트 정책에 따라 별도로 미설정을 보고한다. 조회는 읽기 전용이지만 GitHub 인증·네트워크가 필요하고 확인할 수 없는 해당 PR 명령은 fail closed다. `--admin` 우회와 `--delete-branch` 동시 삭제는 허용하지 않으며 삭제는 아래 정리 경로로 분리한다.
+
+### 머지 후 정리 증표
+
+머지 뒤에는 base에 변경이 포함되므로 새 PR diff를 요구하지 않는다. 실제 PR의 MERGED 상태, 원래 head 브랜치·SHA, 같은 저장소의 remote, merge commit이 fetch한 base에 포함됐는지를 확인해 별도 증표를 기록한다. fork PR과 base·상시 브랜치 삭제는 지원하지 않는다. 다른 PR·후속 커밋·worktree 사용 여부 등 `pr-lifecycle`의 보존 조건도 계속 적용한다.
+
+```bash
+python3 .workflow-hooks/communication.py \
+  --root /path/to/workspace \
+  --record-pr-cleanup \
+  --repo /path/to/workspace/repository \
+  --pr 123 --remote origin
+```
+
+그다음 별도 셸 호출에서 확인한 SHA를 lease로 걸어 해당 head 하나만 삭제한다.
+
+```bash
+git push --force-with-lease=refs/heads/feature:<merged-pr-head-sha> origin :refs/heads/feature
+```
+
+정리 증표도 24시간 뒤 만료한다. 실행 직전 실제 PR 상태와 remote·브랜치·head SHA·merge 반영을 다시 확인하며, 정확한 lease가 없으면 거부한다. PR 실행 의도가 없는 후속 정리 턴에도 삭제 검사를 적용한다. 원격 head가 이미 사라졌으면 삭제 명령 대신 완료로 처리한다. GitHub 조회가 막히면 정리 증거를 확인할 수 없다고 보고하고 삭제를 보류한다.
 
 Stop은 최종 답변의 특정 단어, ‘미결사항 없음’ 선언, 작업 기록 존재 여부를 통과 증거로 사용하지 않는다. 구조적으로 재점검할 때가 됐음을 알릴 뿐, 이미 설명한 작업도 한 번 더 검토될 수 있다. 이미 충분히 안내했다면 반복 설명·승인 요청·추가 테스트 없이 종료하도록 지시한다. Codex는 `decision: block`, Claude는 `hookSpecificOutput.additionalContext`로 동일한 1회 재점검을 요청한다. 새 응답이 추가될 수 있으므로 추가 지연이 0이라고 주장하지 않는다.
 
@@ -81,11 +108,11 @@ python3 scripts/install_communication_hooks.py --target /path/to/workspace --rem
 
 - Codex: 새 세션의 `/hooks`에서 세 이벤트의 명령·출처를 검토하고 신뢰한다. 새 훅과 정의가 바뀐 훅은 신뢰 전 건너뛴다. 스크립트 SHA-256을 명령의 `--revision`에 포함하여 코드 갱신도 정의 변경으로 드러나게 한다. 훅은 자체 파일 해시가 다르면 경고 후 실행을 건너뛴다. 전역 신뢰 해시를 직접 수정하거나 trust 우회 옵션으로 활성화하지 않는다.
 - Claude Code: 새 세션의 `/hooks`에서 프로젝트 로컬 설정의 세 이벤트를 확인한다. 기존 프로젝트 신뢰 절차를 따른다. `disableAllHooks`, 설정 source 제한, bare/safe mode 등으로 비활성화돼 있으면 파일 설치만으로 실행되지 않는다.
-- 현재 지원을 확인한 CLI: Codex 0.154.0, Claude Code 2.1.273. 새 버전은 이벤트 입력·출력과 설정 로딩을 다시 확인한다.
+- 최초 시범 검증 CLI는 Codex 0.154.0, Claude Code 2.1.273이다. 2026-09-18에는 Codex 0.155.0의 `hooks/list`와 Claude Code 2.1.275 환경의 설치 구성을 확인했다. 설치 런타임의 합성 이벤트·CLI 검사는 새 모델 세션의 실제 행동 검증과 구분한다.
 
 ## 상태·비용·실패 처리
 
-별도 모델 호출이나 대화 원문 수집은 없다. 일반 이벤트는 네트워크를 사용하지 않고, 직접 `gh pr merge`만 GitHub PR 상태를 한 번 읽는다. 세션 ID 해시, 턴 구분, 디렉터리 해시, 단계·점검 여부만 로컬 SQLite에 기록한다. 명령·프롬프트·답변·인증값·실제 경로를 기록하지 않는다. 14일 지난 항목은 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
+별도 모델 호출이나 대화 원문 수집은 없다. 일반 전달 이벤트는 네트워크를 사용하지 않는다. PR 생성은 선택된 저장소와 원격 브랜치를, merge·정리 증표 기록·삭제 검사는 GitHub PR 상태를 읽는다. 로컬 SQLite에는 반복 억제용 세션·디렉터리 해시와 단계 상태, 위 검토 증표 및 PR 번호·Git ref/SHA·원격 식별 해시에 묶인 정리 증표를 보존한다. 명령·프롬프트·답변·인증값·실제 경로는 기록하지 않는다. 14일 지난 세션 상태는 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
 
 Codex는 turn_id를 사용하고 Claude는 UserPromptSubmit으로 입력 경계를 만든다. 경계가 없으면 이전 작업을 추정해 Stop을 재개하지 않는다. 서브에이전트 전용 훅은 등록하지 않으며 모든 병렬·서브에이전트 상황의 동등성은 미검증이다.
 
