@@ -42,6 +42,10 @@ python3 .workflow-hooks/communication.py \
 
 셸의 backslash-newline으로 이어 쓴 명령은 한 명령으로 검사한다. 인용된 본문·heredoc·주석을 실제 후속 명령과 구분한다. `gh pr create --help`, `gh pr merge --help`, `git push -h` 같은 도움말 조회는 PR 경계가 아니다. 제목·본문의 값인 `--help`나 `gh --help=false`는 검토를 면제하지 않는다.
 
+직접 명령의 정적 인자는 단일·이중 인용, 인용 연결, backslash 인용, `$'…'`의 일반 문자와 `\\`, `\'`, `\"`, `\a`, `\b`, `\e`, `\E`, `\f`, `\n`, `\r`, `\t`, `\v` 이스케이프를 지원한다. 인용된 `';'`, `'>'`, 빈 문자열·개행은 인자이고 실제 연산자만 복합 명령·리다이렉션으로 분류한다. ANSI-C 인용 heredoc delimiter도 같은 규칙으로 읽는다. 숫자·제어문자형 등 나머지 ANSI-C 이스케이프는 셸·로케일 차이를 추정하지 않고 해석 불확실로 처리한다. 이 경우 literal 인자 또는 `--body-file`을 사용한다.
+
+파싱 실패는 빈 명령 목록과 구분한다. 실패 전에 식별한 PR 경계·직접 git/gh 실행 파일 또는 원문에 남은 `git push`/`gh pr create·merge` 후보는 PR 의도·검토 증표 유무와 무관하게 거부하며 명령을 단순화하도록 안내한다. 해석 불완전한 예제 문자열도 보수적으로 차단될 수 있지만 정상적으로 인용된 예제·heredoc 본문에는 이 fallback을 적용하지 않는다. 이 파서는 Bash/Zsh 전체 문법을 구현하지 않으며 명령·변수 치환, 동적으로 만든 실행 파일 이름, 래퍼의 내부 실행은 아래 미지원 범위에 해당한다.
+
 - `gh pr create --base <브랜치>`는 검토한 base의 **브랜치 이름**과 대조한다. `origin/develop`을 검토했다면 `--base develop`을 쓰며, 로컬 develop이 뒤처졌다는 이유로 거부하지 않는다. freshness는 검토한 ref의 SHA로 확인한다.
 - `--head <현재 브랜치>`를 반드시 명시한다. 생략하면 gh가 추적 설정에 따라 다른 브랜치·fork를 선택할 수 있으므로 거부한다. 다른 브랜치는 그 checkout에서 다시 검토한다. 생성 전에 push를 끝내고, `gh repo view`가 선택한 저장소와 `git ls-remote`로 읽은 실제 원격 head SHA를 증표와 대조한다. 대상 조회 실패·미push·원격 head 불일치 시 생성하지 않는다.
 - 일반 push는 설정된 remote 이름과 단일 refspec을 명시한다. 예: `git push -u origin HEAD:refs/heads/feature`. source SHA가 검토 HEAD와 같고 목적지는 현재 작업 브랜치여야 하며 원격 대상이 증표와 일치해야 한다. 암시적 push·다중 ref·`--all`·`--tags` 등은 이 게이트의 지원 경로가 아니다.
