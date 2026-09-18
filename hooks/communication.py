@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib.parse import urlsplit
 
 START = (
     '중요 사항 전달 점검: 다단계 구현·조사라면 초기 조사 후, 의존 실행 전에 '
@@ -97,11 +98,73 @@ def file_scope(paths, cwd):
     return groups, sensitive
 
 
+def without_heredoc_bodies(command):
+    """Keep shell command lines while skipping literal here-document contents."""
+    output, pending = [], []
+    quote = None
+    for line in command.splitlines(keepends=True):
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            candidate = line.rstrip('\r\n')
+            if (candidate.lstrip('\t') if strip_tabs else candidate) == delimiter:
+                pending.pop(0)
+            output.append('\n')
+            continue
+        output.append(line)
+        index = 0
+        while index < len(line):
+            char = line[index]
+            if char == '\\' and quote != "'":
+                index += 2
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+                index += 1
+                continue
+            if char in "'\"`":
+                quote = char
+                index += 1
+                continue
+            if char == '#' and (index == 0 or line[index - 1].isspace()):
+                break
+            if line.startswith('<<<', index):
+                index += 3
+                continue
+            if not line.startswith('<<', index):
+                index += 1
+                continue
+            index += 2
+            strip_tabs = line[index:index + 1] == '-'
+            index += int(strip_tabs)
+            while index < len(line) and line[index] in ' \t':
+                index += 1
+            start, marker_quote = index, None
+            while index < len(line):
+                char = line[index]
+                if char == '\\' and marker_quote != "'":
+                    index += 2
+                    continue
+                if marker_quote:
+                    if char == marker_quote:
+                        marker_quote = None
+                elif char in "'\"":
+                    marker_quote = char
+                elif char.isspace() or char in ';&|()<>':
+                    break
+                index += 1
+            marker = shlex.split(line[start:index], posix=True)
+            if marker:
+                pending.append((marker[0], strip_tabs))
+    return ''.join(output)
+
+
 def shell_segments(command):
     """Tokenize direct shell segments without inspecting quoted program text."""
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()\n<>')
+        lexer = shlex.shlex(without_heredoc_bodies(command), posix=True, punctuation_chars=';&|()\n<>')
         lexer.whitespace = ' \t\r'
+        lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
         return ''
@@ -115,74 +178,193 @@ def shell_segments(command):
             segment.append(token)
     if segment:
         segments.append(segment)
-    # Heredoc bodies are opaque. A word in a script/example isn't a direct command.
-    if any('<<' in segment for segment in segments):
-        segments = segments[:1]
     return segments
 
 
+def push_boundary(words, repo=None):
+    """Accept one explicit destination and refspec; never infer push.default."""
+    boundary = {'action': 'push', 'repo': repo, 'base': None, 'remote': None,
+                'refspec': None, 'lease': None, 'delete': False, 'error': None,
+                'cleanup_options': True, 'dry_run': False, 'unknown_option': False}
+    positional = []
+    flags = True
+    for word in words:
+        if flags and word == '--':
+            flags = False
+        elif flags and word in {'--dry-run', '-n'}:
+            boundary['dry_run'] = True
+        elif flags and word.startswith('--force-with-lease='):
+            if boundary['lease'] is not None:
+                boundary['error'] = 'Only one explicit force-with-lease is supported'
+            boundary['lease'] = word.split('=', 1)[1]
+        elif flags and word in {'--delete', '-d'}:
+            boundary['cleanup_options'] = False
+            boundary['delete'] = True
+            boundary['error'] = 'Delete with an explicit lease and :refs/heads/<branch> refspec'
+        elif flags and word in {'-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose',
+                                '--porcelain', '--progress', '--no-progress', '--atomic',
+                                '--no-verify', '--no-follow-tags', '--force-with-lease',
+                                '--force-if-includes', '-f', '--force'}:
+            boundary['cleanup_options'] = False
+            continue
+        elif flags and word.startswith('-'):
+            boundary['unknown_option'] = True
+            if word.startswith('--') and (
+                    (len(word) > 2 and '--delete'.startswith(word))
+                    or word in {'--mirror', '--prune'}):
+                boundary['delete'] = True
+            if not word.startswith('--') and 'd' in word[1:]:
+                boundary['delete'] = True
+            boundary['error'] = 'Unsupported push option; use one explicit remote and refspec'
+        else:
+            positional.append(word)
+    boundary['delete'] |= any(word.startswith((':', '+:')) for word in positional)
+    if len(positional) != 2:
+        boundary['error'] = 'git push requires one explicit named remote and one refspec'
+    else:
+        boundary['remote'], boundary['refspec'] = positional
+    return boundary
+
+
+def gh_boundary(words, repo=None):
+    """Parse documented direct create/merge options without interpreting body text."""
+    words = list(words)
+    overridden = False
+    error = None
+
+    def global_option():
+        nonlocal overridden, error
+        if not words:
+            return False
+        word = words[0]
+        if word in {'-R', '--repo', '--hostname'}:
+            overridden = True
+            del words[:2]
+            return True
+        if word.startswith(('--repo=', '--hostname=')) or (word.startswith('-R') and len(word) > 2):
+            overridden = True
+            words.pop(0)
+            return True
+        return False
+
+    while global_option():
+        pass
+    if not words or words.pop(0) != 'pr':
+        return None
+    while global_option():
+        pass
+    if not words or words[0] not in {'create', 'merge'}:
+        return None
+    action = words.pop(0)
+    boundary = {'action': action, 'repo': repo, 'base': None, 'head': None,
+                'remote_repo': False, 'pr_number': None, 'match_head': None, 'error': None}
+    value_options = ({'--base': 'base', '-B': 'base', '--head': 'head', '-H': 'head',
+                      '--title': None, '-t': None, '--body': None, '-b': None,
+                      '--body-file': None, '-F': None, '--template': None, '-T': None,
+                      '--assignee': None, '-a': None, '--reviewer': None, '-r': None,
+                      '--label': None, '-l': None, '--project': None, '-p': None,
+                      '--milestone': None, '-m': None, '--recover': None}
+                     if action == 'create' else
+                     {'--match-head-commit': 'match_head', '--subject': None, '-t': None,
+                      '--body': None, '-b': None, '--body-file': None, '-F': None,
+                      '--author-email': None, '-A': None})
+    boolean_options = ({'--draft', '-d', '--fill', '-f', '--fill-first', '--fill-verbose',
+                        '--editor', '-e', '--web', '-w', '--dry-run'}
+                       if action == 'create' else
+                       {'--merge', '-m', '--squash', '-s', '--rebase', '-r', '--auto',
+                        '--disable-auto', '--admin', '--delete-branch', '-d'})
+    positionals = []
+    while words:
+        if global_option():
+            continue
+        word = words.pop(0)
+        if word == '--':
+            positionals.extend(words)
+            break
+        option, separator, attached = word.partition('=')
+        if not separator and word.startswith('-') and not word.startswith('--') and len(word) > 2:
+            option, attached, separator = word[:2], word[2:], '='
+        if option in value_options:
+            if not separator and not words:
+                error = 'A PR option is missing its value'
+                break
+            value = attached if separator else words.pop(0)
+            key = value_options[option]
+            if key:
+                if boundary[key] is not None:
+                    error = 'Do not repeat PR target options'
+                boundary[key] = value
+        elif word in {'--admin', '--delete-branch'} or (action == 'merge' and word == '-d'):
+            error = 'Merge without admin bypass or branch deletion; use separate merged-PR cleanup'
+        elif word in boolean_options:
+            pass
+        elif word.startswith('-'):
+            error = 'Unsupported PR option; use documented explicit create/merge options'
+        else:
+            positionals.append(word)
+    if action == 'merge' and len(positionals) == 1:
+        boundary['pr_number'] = positionals[0]
+    elif positionals:
+        error = 'Use a single numeric PR number for merge and no positional target for create'
+    boundary.update(remote_repo=overridden, error=error)
+    return boundary
+
+
 def shell_events(command):
-    """Return the reminder kind and first direct PR boundary command."""
+    """Identify direct commands. PR boundaries must be isolated shell commands."""
     segments = shell_segments(command)
-    kind = ''
-    boundary = None
-    active_cwd = None
+    kind, boundaries = '', []
     for words in segments:
         words = list(words)
-        while words and (words[0] == 'env' or re.match(r'^[A-Za-z_][A-Za-z_0-9]*=', words[0])):
+        environment = False
+        if words and Path(words[0]).name == 'env':
+            environment = True
+            words.pop(0)
+            while words and words[0].startswith('-'):
+                option = words.pop(0)
+                if option in {'-u', '--unset', '-C', '--chdir'} and words:
+                    words.pop(0)
+        while words and re.match(r'^[A-Za-z_][A-Za-z_0-9]*=', words[0]):
+            environment = True
             words.pop(0)
         if not words:
             continue
         executable = Path(words.pop(0)).name
-        if executable == 'cd' and len(words) == 1:
-            active_cwd = words[0]
-            continue
+        boundary = None
         if executable == 'git':
-            repo_arg = active_cwd
+            repo_arg, unsafe_git = None, False
             while words and words[0].startswith('-'):
                 option = words.pop(0)
-                if option in {'-C', '-c', '--git-dir', '--work-tree'} and words:
-                    value = words.pop(0)
-                    if option == '-C':
-                        repo_arg = value
+                if option == '-C' and words:
+                    if repo_arg is not None:
+                        unsafe_git = True
+                    repo_arg = words.pop(0)
                 elif option.startswith('-C') and len(option) > 2:
+                    unsafe_git |= repo_arg is not None
                     repo_arg = option[2:]
-            if words and words[0] == 'push' and not {'--dry-run', '-n'} & set(words):
+                else:
+                    unsafe_git = True
+                    if option in {'-c', '--git-dir', '--work-tree', '--namespace', '--config-env'} and words:
+                        words.pop(0)
+            if words and words[0] == 'push':
+                boundary = push_boundary(words[1:], repo_arg)
+                if boundary['dry_run'] and not boundary['unknown_option']:
+                    boundary = None
+                else:
+                    kind = 'release'
+                    if unsafe_git:
+                        boundary['error'] = 'Only a single git -C directory override is supported'
+        if executable == 'gh':
+            boundary = gh_boundary(words)
+            if boundary or words[:2] == ['release', 'create']:
                 kind = 'release'
-                boundary = boundary or {'action': 'push', 'repo': repo_arg, 'base': None}
-        gh_words = list(words)
-        remote_repo = False
-        while gh_words and gh_words[0].startswith('-'):
-            option = gh_words.pop(0)
-            if option in {'-R', '--repo', '--hostname'} and gh_words:
-                gh_words.pop(0)
-                remote_repo |= option in {'-R', '--repo'}
-            elif option.startswith('--repo='):
-                remote_repo = True
-        if executable == 'gh' and gh_words[:2] in (['pr', 'create'], ['pr', 'merge']):
-            kind = 'release'
-            base = None
-            pr_number = None
-            match_head = None
-            if gh_words[1] == 'merge' and len(gh_words) > 2 and not gh_words[2].startswith('-'):
-                pr_number = gh_words[2]
-            for index, word in enumerate(gh_words[2:], start=2):
-                if word == '--base' and index + 1 < len(gh_words):
-                    base = gh_words[index + 1]
-                elif word.startswith('--base='):
-                    base = word.split('=', 1)[1]
-                elif word == '--match-head-commit' and index + 1 < len(gh_words):
-                    match_head = gh_words[index + 1]
-                elif word.startswith('--match-head-commit='):
-                    match_head = word.split('=', 1)[1]
-                elif word in {'-R', '--repo'} or word.startswith('--repo='):
-                    remote_repo = True
-            if boundary is None or boundary['action'] == 'push':
-                boundary = {'action': gh_words[1], 'repo': active_cwd, 'base': base,
-                            'remote_repo': remote_repo, 'pr_number': pr_number,
-                            'match_head': match_head}
-        if executable == 'gh' and gh_words[:2] == ['release', 'create']:
-            kind = 'release'
+        if boundary:
+            if environment:
+                boundary['error'] = 'Run PR boundaries without env or inline environment assignments'
+            if len(segments) != 1 or any(word in {'<', '>', '>>', '<<', '<<<', '<>', '>&', '<&'}
+                                         for segment in segments for word in segment):
+                boundary['error'] = 'Run each PR boundary as a standalone shell command without redirection'
+            boundaries.append(boundary)
         if executable in {'railway', 'vercel', 'fly', 'flyctl', 'firebase', 'wrangler'}:
             if words and words[0] in {'up', 'deploy', 'redeploy', 'publish'}:
                 kind = 'release'
@@ -191,8 +373,11 @@ def shell_events(command):
         if executable in {'npm', 'pnpm', 'yarn'} and words[:2] == ['run', 'deploy']:
             kind = 'release'
         if executable in {'python', 'python3', 'node', 'ruby', 'bash', 'sh', 'zsh',
-                          'cp', 'mv', 'rm', 'mkdir', 'tee', 'touch', 'apply_patch'}:
+                          'cp', 'mv', 'rm', 'mkdir', 'tee', 'touch', 'apply_patch'} and kind != 'release':
             kind = 'edit'  # Opaque scripts get a reminder, not a completion gate.
+    # Always-gated PR/cleanup commands must not be hidden by a preceding ordinary push.
+    boundary = max(boundaries, key=lambda item: 2 if item['action'] != 'push'
+                   else int(item.get('delete', False)), default=None)
     return kind, boundary
 
 
@@ -238,7 +423,7 @@ def git_output(repo, *args, allowed=(0,)):
 
 def remote_pr_state(repo, pr_number):
     fields = ('number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,'
-              'mergeable,mergeStateStatus,statusCheckRollup,url')
+              'mergeable,mergeStateStatus,statusCheckRollup,url,mergeCommit,isCrossRepository')
     environment = dict(os.environ)
     environment['GH_PROMPT_DISABLED'] = '1'
     result = subprocess.run(['gh', 'pr', 'view', str(pr_number), '--json', fields],
@@ -255,6 +440,46 @@ def remote_pr_state(repo, pr_number):
     return state
 
 
+def remote_repository_identity(repo):
+    """Read the repository selected by gh's own remotes/default-repository rules."""
+    environment = dict(os.environ)
+    environment['GH_PROMPT_DISABLED'] = '1'
+    result = subprocess.run(['gh', 'repo', 'view', '--json', 'url'], cwd=repo,
+                            env=environment, capture_output=True, timeout=8, check=False)
+    if result.returncode:
+        raise ValueError('GitHub repository selection could not be verified')
+    try:
+        state = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError('GitHub repository selection returned invalid JSON') from exc
+    if not isinstance(state, dict) or not isinstance(state.get('url'), str):
+        raise ValueError('GitHub repository selection returned an invalid shape')
+    return repository_identity(state['url'])
+
+
+def remote_branch_sha(repo, remote, branch):
+    output, _ = git_output(repo, 'ls-remote', '--heads', remote, 'refs/heads/' + branch)
+    lines = output.decode().splitlines()
+    if len(lines) != 1:
+        raise ValueError('Push the reviewed branch before creating a PR')
+    fields = lines[0].split()
+    if (len(fields) != 2 or fields[1] != 'refs/heads/' + branch
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', fields[0])):
+        raise ValueError('The remote PR branch SHA could not be verified')
+    return fields[0]
+
+
+def pr_repository_identity(state, pr_number):
+    url = state.get('url')
+    if not isinstance(url, str):
+        raise ValueError('The PR repository identity could not be verified')
+    parts = urlsplit(url)
+    suffix = '/pull/' + str(pr_number)
+    if parts.scheme != 'https' or not parts.hostname or not parts.path.endswith(suffix):
+        raise ValueError('The PR URL does not identify the requested PR')
+    return repository_identity('https://' + parts.hostname + parts.path[:-len(suffix)])
+
+
 def reviewed_base_name(repo, base_ref):
     output, _ = git_output(repo, 'rev-parse', '--symbolic-full-name', '--verify',
                            '--end-of-options', base_ref)
@@ -268,7 +493,7 @@ def reviewed_base_name(repo, base_ref):
     raise ValueError('The reviewed base must identify a local or remote-tracking branch')
 
 
-def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha):
+def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity):
     pr_number = boundary.get('pr_number')
     if not isinstance(pr_number, str) or not pr_number.isdigit():
         raise ValueError('gh pr merge requires an explicit numeric PR number')
@@ -277,6 +502,8 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha):
     state = remote_pr_state(repo, pr_number)
     if state.get('number') != int(pr_number):
         raise ValueError('GitHub returned a different PR number')
+    if digest(pr_repository_identity(state, pr_number)) != recorded_identity:
+        raise ValueError('The remote PR repository does not match the reviewed repository')
     if state.get('state') != 'OPEN' or state.get('isDraft') is not False:
         raise ValueError('The target PR is not an open non-draft PR')
     if state.get('baseRefName') != reviewed_base_name(repo, base_ref):
@@ -372,8 +599,9 @@ def ensure_review_table(db):
                    merge_base TEXT, untracked TEXT NOT NULL DEFAULT '', minor INTEGER,
                    updated REAL)''')
     columns = {row[1] for row in db.execute('PRAGMA table_info(reviews)')}
-    if 'untracked' not in columns:
-        db.execute("ALTER TABLE reviews ADD COLUMN untracked TEXT NOT NULL DEFAULT ''")
+    for column in ('untracked', 'remote_name', 'remote_identity', 'head_name'):
+        if column not in columns:
+            db.execute("ALTER TABLE reviews ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''")
 
 
 def record_review(root, repo, base, requirements, contracts, validation,
@@ -384,14 +612,20 @@ def record_review(root, repo, base, requirements, contracts, validation,
         raise ValueError('Finding counts must be non-negative integers')
     if major or blocker:
         raise ValueError('Resolve MAJOR and BLOCKER findings before recording a pass')
+    check_command_context({})
     repo, base_sha, head_sha, merge_base, untracked = repository_state(root, repo, base)
+    remote = review_remote(repo, base)
+    identity = digest(remote_identity(repo, remote))
+    head_name, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+    head_name = head_name.decode().strip()
     with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
         ensure_review_table(db)
         db.execute('''INSERT OR REPLACE INTO reviews
-                      (repo, base_ref, base_sha, head_sha, merge_base, untracked, minor, updated)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                      (repo, base_ref, base_sha, head_sha, merge_base, untracked, minor, updated,
+                       remote_name, remote_identity, head_name)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                    (digest(str(repo)), base, base_sha, head_sha, merge_base, untracked,
-                    minor, time.time()))
+                    minor, time.time(), remote, identity, head_name))
     return {'base': base_sha, 'head': head_sha, 'minor': minor}
 
 
@@ -403,20 +637,214 @@ def review_record_command(root, repo):
     return shlex.join(command)
 
 
+def named_remotes(repo):
+    output, _ = git_output(repo, 'remote')
+    return output.decode().splitlines()
+
+
+def repository_identity(url):
+    """Compare destinations without retaining credentials or emitting raw URLs."""
+    if '://' not in url:
+        ssh = re.fullmatch(r'(?:[^/@:]+@)?([^/:]+):(.+)', url)
+        if ssh:
+            host, path = ssh.groups()
+        else:
+            return 'file:' + str(Path(url).resolve())
+    else:
+        parts = urlsplit(url)
+        if parts.scheme not in {'https', 'http', 'ssh', 'git'} or not parts.hostname:
+            raise ValueError('Unsupported remote repository URL')
+        host, path = parts.hostname, parts.path
+    path = path.strip('/').removesuffix('.git')
+    if not path or any(part in {'', '.', '..'} for part in path.split('/')):
+        raise ValueError('Invalid remote repository identity')
+    return host.lower() + '/' + path.lower()
+
+
+def remote_identity(repo, remote):
+    if not isinstance(remote, str) or remote not in named_remotes(repo):
+        raise ValueError('Use one explicitly configured remote name')
+    fetch, _ = git_output(repo, 'remote', 'get-url', '--all', remote)
+    push, _ = git_output(repo, 'remote', 'get-url', '--push', '--all', remote)
+    fetch_urls, push_urls = fetch.decode().splitlines(), push.decode().splitlines()
+    if len(fetch_urls) != 1 or len(push_urls) != 1:
+        raise ValueError('Exactly one fetch URL and one push URL are required')
+    identity = repository_identity(fetch_urls[0])
+    if repository_identity(push_urls[0]) != identity:
+        raise ValueError('Remote fetch and push repository identities differ')
+    return identity
+
+
+def review_remote(repo, base_ref):
+    output, _ = git_output(repo, 'rev-parse', '--symbolic-full-name', '--verify',
+                           '--end-of-options', base_ref)
+    full_name = output.decode().strip()
+    if full_name.startswith('refs/remotes/'):
+        return full_name.split('/', 3)[2]
+    remotes = named_remotes(repo)
+    if 'origin' in remotes:
+        return 'origin'
+    if len(remotes) == 1:
+        return remotes[0]
+    raise ValueError('Review a fetched remote base or configure one unambiguous origin remote')
+
+
+def check_command_context(boundary):
+    if boundary.get('error'):
+        raise ValueError(boundary['error'])
+    if boundary.get('remote_repo'):
+        raise ValueError('Run gh from the reviewed local repository without --repo/-R or hostname overrides')
+    if any(os.environ.get(key) for key in ('GH_REPO', 'GH_HOST', 'GIT_DIR', 'GIT_WORK_TREE',
+                                          'GIT_COMMON_DIR', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS')):
+        raise ValueError('Clear inherited Git/GitHub repository override variables before this command')
+
+
+def check_push(repo, boundary, head_sha, recorded_identity):
+    remote, refspec = boundary.get('remote'), boundary.get('refspec')
+    if not isinstance(refspec, str) or not refspec or refspec.startswith((':', '+')):
+        raise ValueError('Use a single non-deletion refspec with an explicit reviewed source')
+    if refspec.count(':') > 1 or '*' in refspec:
+        raise ValueError('Wildcard or multiple push refspecs are not supported')
+    source, separator, destination = refspec.partition(':')
+    if separator and not destination:
+        raise ValueError('Push destination must not be empty')
+    branch, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+    branch = branch.decode().strip()
+    if (separator and destination not in {branch, 'refs/heads/' + branch}) or (
+            not separator and source not in {branch, 'refs/heads/' + branch, 'HEAD'}):
+        raise ValueError('Push destination must be the currently reviewed branch')
+    if commit_sha(repo, source) != head_sha:
+        raise ValueError('Push source SHA does not match the reviewed HEAD')
+    if digest(remote_identity(repo, remote)) != recorded_identity:
+        raise ValueError('Push remote does not match the reviewed base repository')
+    check_single_push_config(repo, remote)
+
+
+def check_single_push_config(repo, remote):
+    mirror, _ = git_output(repo, 'config', '--bool', '--get', 'remote.' + remote + '.mirror', allowed=(0, 1))
+    follow_tags, _ = git_output(repo, 'config', '--bool', '--get', 'push.followTags', allowed=(0, 1))
+    if mirror.strip() == b'true' or follow_tags.strip() == b'true':
+        raise ValueError('Disable remote mirror and push.followTags before a reviewed single-ref push')
+
+
+def ensure_cleanup_table(db):
+    db.execute('''CREATE TABLE IF NOT EXISTS cleanups
+                  (repo TEXT, remote TEXT, pr_number TEXT, head_name TEXT, head_sha TEXT,
+                   base_name TEXT, merge_sha TEXT, identity TEXT, updated REAL,
+                   PRIMARY KEY (repo, remote, head_name))''')
+
+
+def cleanup_state(repo, pr_number, remote):
+    if not str(pr_number).isdigit():
+        raise ValueError('Cleanup requires an explicit numeric PR number')
+    state = remote_pr_state(repo, str(pr_number))
+    if state.get('number') != int(pr_number) or state.get('state') != 'MERGED':
+        raise ValueError('The cleanup target PR must be MERGED')
+    if state.get('isCrossRepository') is not False:
+        raise ValueError('Only a same-repository merged PR can authorize cleanup')
+    head, base = state.get('headRefName'), state.get('baseRefName')
+    if not isinstance(head, str) or not isinstance(base, str):
+        raise ValueError('The merged PR branch names could not be verified')
+    if head == base or head in {'main', 'master', 'develop', 'development', 'trunk'}:
+        raise ValueError('A persistent integration branch is not a cleanup target')
+    git_output(repo, 'check-ref-format', 'refs/heads/' + head)
+    git_output(repo, 'check-ref-format', 'refs/heads/' + base)
+    head_sha = state.get('headRefOid')
+    merge = state.get('mergeCommit')
+    merge_sha = merge.get('oid') if isinstance(merge, dict) else None
+    if any(not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha)
+           for sha in (head_sha, merge_sha)):
+        raise ValueError('The merged PR head and merge commit SHAs could not be verified')
+    identity = remote_identity(repo, remote)
+    if identity != pr_repository_identity(state, pr_number):
+        raise ValueError('Cleanup remote does not match the merged PR repository')
+    check_single_push_config(repo, remote)
+    fetched_base = commit_sha(repo, 'refs/remotes/' + remote + '/' + base)
+    _, contained = git_output(repo, 'merge-base', '--is-ancestor', merge_sha, fetched_base,
+                              allowed=(0, 1))
+    if contained:
+        raise ValueError('Fetch the merged PR base before recording or using cleanup evidence')
+    return head, head_sha, base, merge_sha, digest(identity)
+
+
+def record_cleanup(root, repo, pr_number, remote):
+    check_command_context({})
+    repo = resolve_repo(root, repo)
+    values = cleanup_state(repo, pr_number, remote)
+    with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
+        ensure_cleanup_table(db)
+        db.execute('INSERT OR REPLACE INTO cleanups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                   (digest(str(repo)), remote, str(pr_number), *values, time.time()))
+    return {'pr': int(pr_number), 'head': values[1], 'branch': values[0], 'remote': remote}
+
+
+def cleanup_record_command(root, repo, remote='<remote>', pr_number='<merged-pr-number>'):
+    return shlex.join([sys.executable, str(Path(__file__).resolve()), '--root', str(root),
+                       '--record-pr-cleanup', '--repo', str(repo), '--pr', str(pr_number),
+                       '--remote', remote])
+
+
+def check_cleanup(root, cwd, boundary):
+    try:
+        check_command_context(boundary)
+        repo = resolve_repo(root, cwd, boundary.get('repo'))
+        refspec, remote, lease = boundary.get('refspec'), boundary.get('remote'), boundary.get('lease')
+        if not boundary.get('cleanup_options'):
+            raise ValueError('Cleanup supports only an explicit lease, named remote and deletion refspec')
+        if not isinstance(refspec, str) or not refspec.startswith(':refs/heads/'):
+            raise ValueError('Cleanup requires one exact :refs/heads/<branch> deletion refspec')
+        head = refspec.removeprefix(':refs/heads/')
+        git_output(repo, 'check-ref-format', 'refs/heads/' + head)
+        with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
+            ensure_cleanup_table(db)
+            row = db.execute('SELECT pr_number, head_name, head_sha, base_name, merge_sha, identity, updated '
+                             'FROM cleanups WHERE repo=? AND remote=? AND head_name=?',
+                             (digest(str(repo)), remote, head)).fetchone()
+        if not row:
+            raise ValueError('No merged-PR cleanup receipt exists for this branch and remote')
+        pr_number, recorded_head, head_sha, base_name, merge_sha, identity, updated = row
+        if time.time() - updated > REVIEW_MAX_AGE:
+            raise ValueError('The cleanup receipt is older than 24 hours')
+        if lease != 'refs/heads/' + head + ':' + head_sha:
+            raise ValueError('Cleanup requires --force-with-lease=refs/heads/<branch>:<merged-head-sha>')
+        if cleanup_state(repo, pr_number, remote) != (recorded_head, head_sha, base_name, merge_sha, identity):
+            raise ValueError('Merged PR cleanup evidence changed after it was recorded')
+        return None
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
+        try:
+            repo = resolve_repo(root, cwd, boundary.get('repo'))
+        except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+            repo = Path(cwd)
+        return deny('PR cleanup gate blocked this command: ' + (str(exc) or 'Cleanup state unavailable')
+                    + '. Fetch the merged base and record separate cleanup evidence; a PR diff review '
+                    'receipt cannot authorize branch deletion. Retry after:\n'
+                    + cleanup_record_command(root, repo))
+
+
 def check_review(root, cwd, boundary):
     try:
-        if boundary.get('remote_repo'):
-            raise ValueError('Run gh from the reviewed local repository without --repo/-R')
+        check_command_context(boundary)
         repo = resolve_repo(root, cwd, boundary.get('repo'))
         if boundary['action'] == 'create' and not boundary.get('base'):
             raise ValueError('gh pr create must include an explicit --base')
+        if boundary['action'] == 'create' and not boundary.get('head'):
+            raise ValueError('gh pr create must include an explicit --head for the reviewed branch')
         with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
             ensure_review_table(db)
-            row = db.execute('SELECT base_ref, base_sha, head_sha, merge_base, untracked, updated '
+            row = db.execute('SELECT base_ref, base_sha, head_sha, merge_base, untracked, updated, '
+                             'remote_name, remote_identity, head_name '
                              'FROM reviews WHERE repo=?', (digest(str(repo)),)).fetchone()
         if not row:
             raise ValueError('No review receipt exists for this repository')
-        base_ref, base_sha, head_sha, merge_base, untracked, updated = row
+        (base_ref, base_sha, head_sha, merge_base, untracked, updated, remote,
+         recorded_identity, head_name) = row
+        if not remote or not recorded_identity or not head_name:
+            raise ValueError('The review receipt needs to be recorded again with repository identity')
+        if digest(remote_identity(repo, remote)) != recorded_identity:
+            raise ValueError('Reviewed remote repository changed after review')
+        branch, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+        if branch.decode().strip() != head_name:
+            raise ValueError('Current branch changed after review')
         if time.time() - updated > REVIEW_MAX_AGE:
             raise ValueError('The review receipt is older than 24 hours')
         current_repo, current_base, current_head, current_merge, current_untracked = repository_state(
@@ -425,10 +853,19 @@ def check_review(root, cwd, boundary):
                                     current_untracked) != (
                 base_sha, head_sha, merge_base, untracked):
             raise ValueError('Base, HEAD, or working tree changed after review')
-        if boundary.get('base') and commit_sha(repo, boundary['base']) != base_sha:
-            raise ValueError('PR command base does not match the reviewed base')
+        if boundary.get('base') and boundary['base'] != reviewed_base_name(repo, base_ref):
+            raise ValueError('PR command base branch does not match the reviewed base')
+        if boundary['action'] == 'create':
+            if boundary['head'] != head_name:
+                raise ValueError('PR command head must be the currently reviewed branch')
+            if digest(remote_repository_identity(repo)) != recorded_identity:
+                raise ValueError('GitHub selected repository does not match the reviewed repository')
+            if remote_branch_sha(repo, remote, head_name) != head_sha:
+                raise ValueError('Remote PR branch SHA does not match the reviewed HEAD; push it first')
+        if boundary['action'] == 'push':
+            check_push(repo, boundary, head_sha, recorded_identity)
         if boundary['action'] == 'merge':
-            check_remote_pr(repo, boundary, base_ref, base_sha, head_sha)
+            check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
         return None
     except (OSError, TypeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
         try:
@@ -453,13 +890,22 @@ def handle(payload, engine, root):
     if event not in {'UserPromptSubmit', 'PreToolUse', 'Stop'}:
         return {}
     boundary = None
+    command_cwd = payload.get('cwd', root)
     if event == 'PreToolUse' and payload.get('tool_name') in {'Bash', 'exec_command'}:
         args = payload.get('tool_input', {})
         if isinstance(args, dict):
+            if payload.get('tool_name') == 'exec_command' and isinstance(args.get('workdir'), str):
+                selected_cwd = Path(args['workdir'])
+                command_cwd = (selected_cwd if selected_cwd.is_absolute()
+                               else Path(command_cwd) / selected_cwd)
             command = str(args.get('command', args.get('cmd', '')))
             _, boundary = shell_events(command)
-    if boundary and boundary['action'] in {'create', 'merge'}:
-        blocked = check_review(root, payload.get('cwd', root), boundary)
+    if boundary and boundary.get('delete'):
+        blocked = check_cleanup(root, command_cwd, boundary)
+        if blocked:
+            return blocked
+    elif boundary and boundary['action'] in {'create', 'merge'}:
+        blocked = check_review(root, command_cwd, boundary)
         if blocked:
             return blocked
     session = payload.get('session_id')
@@ -517,8 +963,9 @@ def handle(payload, engine, root):
                           else context('Stop', FINISH))
         db.execute('INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?)',
                    (key, turn, json.dumps(state), time.time()))
-    if boundary and boundary['action'] == 'push' and state.get('pr_intent'):
-        blocked = check_review(root, payload.get('cwd', root), boundary)
+    if (boundary and boundary['action'] == 'push' and not boundary.get('delete')
+            and state.get('pr_intent')):
+        blocked = check_review(root, command_cwd, boundary)
         if blocked:
             return blocked
     return output
@@ -529,7 +976,11 @@ def main():
     parser.add_argument('--engine', choices=('codex', 'claude'))
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--revision')
-    parser.add_argument('--record-pr-review', action='store_true')
+    record = parser.add_mutually_exclusive_group()
+    record.add_argument('--record-pr-review', action='store_true')
+    record.add_argument('--record-pr-cleanup', action='store_true')
+    parser.add_argument('--pr')
+    parser.add_argument('--remote')
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--base')
     parser.add_argument('--requirements-reviewed', action='store_true')
@@ -539,6 +990,16 @@ def main():
     parser.add_argument('--minor', type=int, default=0)
     parser.add_argument('--blocker', type=int, default=0)
     args = parser.parse_args()
+    if args.record_pr_cleanup:
+        try:
+            if args.repo is None or args.pr is None or args.remote is None:
+                raise ValueError('--repo, --pr and --remote are required')
+            result = record_cleanup(args.root, args.repo, args.pr, args.remote)
+        except (OSError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
+            print('PR cleanup receipt not recorded: ' + str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps({'recorded': True, **result}, ensure_ascii=False))
+        return 0
     if args.record_pr_review:
         try:
             if args.repo is None or args.base is None:

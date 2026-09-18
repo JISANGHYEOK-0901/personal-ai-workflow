@@ -2,6 +2,8 @@ import importlib.util
 from contextlib import closing, redirect_stdout
 import io
 import json
+import os
+import shutil
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -30,6 +32,13 @@ class CommunicationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='communication-test-')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        identity = patch.object(HOOK, 'remote_repository_identity', return_value='github.com/audit/sample')
+        identity.start()
+        self.addCleanup(identity.stop)
+        remote_head = patch.object(HOOK, 'remote_branch_sha',
+                                   side_effect=lambda repo, remote, branch: self.git(repo, 'rev-parse', branch))
+        remote_head.start()
+        self.addCleanup(remote_head.stop)
 
     def event(self, event, engine='codex', **fields):
         payload = {'hook_event_name': event, 'session_id': 'session', 'turn_id': 'turn',
@@ -52,6 +61,7 @@ class CommunicationTests(unittest.TestCase):
         self.git(repo, 'init', '-q', '-b', 'main')
         self.git(repo, 'config', 'user.name', 'Hook Test')
         self.git(repo, 'config', 'user.email', 'hook@example.invalid')
+        self.git(repo, 'remote', 'add', 'origin', 'https://github.com/audit/sample.git')
         (repo / 'app.txt').write_text('base\n')
         self.git(repo, 'add', 'app.txt')
         self.git(repo, 'commit', '-q', '-m', 'base')
@@ -168,17 +178,17 @@ class CommunicationTests(unittest.TestCase):
         allowed = self.event('PreToolUse', **push)
         self.assertNotEqual(allowed.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
         create = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
-                            tool_input={'command': 'gh pr create --base main --title test'})
+                            tool_input={'command': 'gh pr create --base main --head feature --title test'})
         self.assertNotEqual(create.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
 
         (repo / 'local-note.txt').write_text('changed untracked file\n')
         stale_untracked = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
-                                     tool_input={'command': 'gh pr create --base main --title test'})
+                                     tool_input={'command': 'gh pr create --base main --head feature --title test'})
         self.assertEqual(stale_untracked['hookSpecificOutput']['permissionDecision'], 'deny')
         (repo / 'local-note.txt').write_text('preserved untracked file\n')
         (repo / 'app.txt').write_text('changed after review\n')
         stale = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
-                           tool_input={'command': 'gh pr create --base main --title test'})
+                           tool_input={'command': 'gh pr create --base main --head feature --title test'})
         self.assertEqual(stale['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('Tracked files or index are not clean',
                       stale['hookSpecificOutput']['permissionDecisionReason'])
@@ -186,20 +196,20 @@ class CommunicationTests(unittest.TestCase):
     def test_pr_create_always_requires_matching_explicit_base_and_clean_pass(self):
         repo = self.feature_repo()
         no_receipt = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
-                                tool_input={'command': 'gh pr create --base main'})
+                                tool_input={'command': 'gh pr create --base main --head feature'})
         self.assertEqual(no_receipt['hookSpecificOutput']['permissionDecision'], 'deny')
         with self.assertRaisesRegex(ValueError, 'MAJOR'):
             HOOK.record_review(self.root, repo, 'main', True, True, True, major=1)
         HOOK.record_review(self.root, repo, 'main', True, True, True, minor=2)
         missing_base = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
-                                  tool_input={'command': 'gh pr create --title test'})
+                                  tool_input={'command': 'gh pr create --head feature --title test'})
         self.assertEqual(missing_base['hookSpecificOutput']['permissionDecision'], 'deny')
         wrong_base = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
-                                tool_input={'command': 'gh pr create --base HEAD'})
+                                tool_input={'command': 'gh pr create --base HEAD --head feature'})
         self.assertEqual(wrong_base['hookSpecificOutput']['permissionDecision'], 'deny')
         remote_repo = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
                                  tool_input={'command':
-                                             'gh pr create --base main --repo owner/repository'})
+                                             'gh pr create --base main --head feature --repo owner/repository'})
         self.assertEqual(remote_repo['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('without --repo/-R',
                       remote_repo['hookSpecificOutput']['permissionDecisionReason'])
@@ -246,7 +256,7 @@ class CommunicationTests(unittest.TestCase):
                   'mergeable': 'MERGEABLE', 'mergeStateStatus': 'CLEAN',
                   'statusCheckRollup': [
                       {'status': 'COMPLETED', 'conclusion': 'SUCCESS'}],
-                  'url': 'https://example.invalid/pull/17'}
+                  'url': 'https://github.com/audit/sample/pull/17'}
         command = 'gh pr merge 17 --merge --match-head-commit ' + head_sha
         with patch.object(HOOK, 'remote_pr_state', return_value=remote) as query:
             allowed = merge(command)
@@ -441,6 +451,8 @@ class InstallationTests(unittest.TestCase):
         subprocess.run(['git', '-C', str(repo), 'init', '-q', '-b', 'main'], check=True)
         subprocess.run(['git', '-C', str(repo), 'config', 'user.name', 'Hook Test'], check=True)
         subprocess.run(['git', '-C', str(repo), 'config', 'user.email', 'hook@example.invalid'], check=True)
+        subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin',
+                        'https://github.com/audit/sample.git'], check=True)
         (repo / 'app.txt').write_text('base\n')
         subprocess.run(['git', '-C', str(repo), 'add', 'app.txt'], check=True)
         subprocess.run(['git', '-C', str(repo), 'commit', '-q', '-m', 'base'], check=True)
@@ -469,9 +481,50 @@ class InstallationTests(unittest.TestCase):
         command = config['hooks']['PreToolUse'][0]['hooks'][0]['command']
         payload = {'hook_event_name': 'PreToolUse', 'session_id': 'test', 'turn_id': 'turn',
                    'cwd': str(repo), 'tool_name': 'Bash',
-                   'tool_input': {'command': 'gh pr create --base main'}}
+                   'tool_input': {'command': 'gh pr create --base main --head feature'}}
+        binaries = self.root / 'binaries'
+        binaries.mkdir()
+        gh = binaries / 'gh'
+        gh.write_text('#!/usr/bin/env python3\nimport json,sys\n'
+                      'assert sys.argv[1:] == ["repo", "view", "--json", "url"]\n'
+                      'print(json.dumps({"url":"https://github.com/audit/sample"}))\n')
+        gh.chmod(0o700)
+        git = binaries / 'git'
+        head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+        git.write_text('#!/usr/bin/env python3\nimport os,sys\n'
+                       f'actual = {shutil.which("git")!r}\n'
+                       'if "ls-remote" in sys.argv:\n'
+                       f' print({(head + chr(9) + "refs/heads/feature")!r})\n'
+                       'else:\n os.execv(actual, [actual, *sys.argv[1:]])\n')
+        git.chmod(0o700)
+        environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ['PATH'])
         run = subprocess.run(command, shell=True, input=json.dumps(payload),
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, env=environment)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotEqual(json.loads(run.stdout).get('hookSpecificOutput', {}).get(
+            'permissionDecision'), 'deny')
+
+        # After merge the installed CLI uses separate cleanup evidence, not a PR diff.
+        subprocess.run(['git', '-C', str(repo), 'checkout', '-q', 'main'], check=True)
+        subprocess.run(['git', '-C', str(repo), 'merge', '--no-ff', '-qm', 'merged', 'feature'], check=True)
+        merged = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+        subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/main', merged], check=True)
+        state = {'number': 17, 'state': 'MERGED', 'isCrossRepository': False,
+                 'baseRefName': 'main', 'headRefName': 'feature', 'headRefOid': head,
+                 'mergeCommit': {'oid': merged}, 'url': 'https://github.com/audit/sample/pull/17'}
+        gh.write_text('#!/usr/bin/env python3\nimport json,sys\n'
+                      'assert sys.argv[1:4] == ["pr", "view", "17"]\n'
+                      f'print(json.dumps({state!r}))\n')
+        record_cleanup = subprocess.run([
+            sys.executable, str(runtime), '--root', str(self.root), '--record-pr-cleanup',
+            '--repo', str(repo), '--pr', '17', '--remote', 'origin'],
+            capture_output=True, text=True, env=environment)
+        self.assertEqual(record_cleanup.returncode, 0, record_cleanup.stderr)
+        self.assertTrue(json.loads(record_cleanup.stdout)['recorded'])
+        payload['tool_input']['command'] = (
+            'git push --force-with-lease=refs/heads/feature:' + head + ' origin :refs/heads/feature')
+        run = subprocess.run(command, shell=True, input=json.dumps(payload),
+                             capture_output=True, text=True, env=environment)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotEqual(json.loads(run.stdout).get('hookSpecificOutput', {}).get(
             'permissionDecision'), 'deny')
