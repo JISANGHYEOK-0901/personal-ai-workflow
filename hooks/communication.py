@@ -98,130 +98,177 @@ def file_scope(paths, cwd):
     return groups, sensitive
 
 
-def without_heredoc_bodies(command):
-    """Keep shell command lines while skipping literal here-document contents."""
-    output, pending = [], []
+class ShellToken(str):
+    """Decoded argument or an actual (unquoted) shell operator."""
+    def __new__(cls, value, operator=False, quoted=False):
+        token = super().__new__(cls, value)
+        token.operator = operator
+        token.quoted = quoted
+        return token
+
+
+class ShellParseError(ValueError):
+    def __init__(self, message, tokens):
+        super().__init__(message)
+        self.tokens = tokens
+
+
+def shell_tokens(command):
+    """Lex static Bash/Zsh words, retaining operators and skipping heredoc data.
+
+    This is not an evaluator: substitutions, wrappers and shell programs remain
+    outside the direct-command contract. Never execute input to classify it.
+    """
+    tokens, pending, word = [], [], []
+    active = quoted = False
     quote = None
-    lines = iter(command.splitlines(keepends=True))
-    for line in lines:
-        if pending:
-            delimiter, strip_tabs, quoted = pending[0]
-            # Unquoted heredocs fold escaped newlines before delimiter matching.
-            while not quoted and line.endswith('\n'):
-                tail = line[:-1]
-                if (len(tail) - len(tail.rstrip('\\'))) % 2 == 0:
-                    break
-                line = line[:-2] + next(lines, '')
-            candidate = line.rstrip('\r\n')
-            if (candidate.lstrip('\t') if strip_tabs else candidate) == delimiter:
-                pending.pop(0)
-            output.append('\n')
-            continue
-        logical_line = line
-        while True:
-            line = shell_command_text(logical_line, quote)
-            if not logical_line.endswith('\n') or line.endswith('\n'):
-                break
-            following = next(lines, '')
-            if not following:
-                break
-            logical_line += following
-        output.append(line)
-        index = 0
-        while index < len(line):
-            char = line[index]
-            if char == '\\' and quote != "'":
-                index += 2
+    delimiter = None
+    i = 0
+
+    def emit():
+        nonlocal active, quoted, word, delimiter
+        if active:
+            token = ShellToken(''.join(word), quoted=quoted)
+            tokens.append(token)
+            if delimiter is not None:
+                pending.append((str(token), delimiter, token.quoted))
+                delimiter = None
+            active = quoted = False
+            word = []
+
+    def fail(message):
+        emit()
+        raise ShellParseError(message, tokens)
+
+    while i < len(command):
+        char = command[i]
+        if quote == "ansi":
+            if char == "'":
+                quote = None
+                i += 1
                 continue
-            if quote:
-                if char == quote:
-                    quote = None
-                index += 1
-                continue
-            if char in "'\"`":
-                quote = char
-                index += 1
-                continue
-            if line.startswith('<<<', index):
-                index += 3
-                continue
-            if not line.startswith('<<', index):
-                index += 1
-                continue
-            index += 2
-            strip_tabs = line[index:index + 1] == '-'
-            index += int(strip_tabs)
-            while index < len(line) and line[index] in ' \t':
-                index += 1
-            start, marker_quote = index, None
-            while index < len(line):
-                char = line[index]
-                if char == '\\' and marker_quote != "'":
-                    index += 2
+            if char == '\\':
+                i += 1
+                if i == len(command):
+                    fail('Incomplete ANSI-C escape')
+                escape = command[i]
+                simple = {'a': '\a', 'b': '\b', 'e': '\x1b', 'E': '\x1b',
+                          'f': '\f', 'n': '\n', 'r': '\r', 't': '\t',
+                          'v': '\v', '\\': '\\', "'": "'", '"': '"'}
+                if escape in simple:
+                    word.append(simple[escape])
+                    i += 1
                     continue
-                if marker_quote:
-                    if char == marker_quote:
-                        marker_quote = None
-                elif char in "'\"":
-                    marker_quote = char
-                elif char.isspace() or char in ';&|()<>':
-                    break
-                index += 1
-            marker_source = line[start:index]
-            marker = shlex.split(marker_source, posix=True)
-            if marker:
-                quoted = any(char in marker_source for char in "'\"\\")
-                pending.append((marker[0], strip_tabs, quoted))
-    return ''.join(output)
-
-
-def shell_command_text(command, quote=None):
-    """Remove shell continuations/comments without changing quoted data."""
-    output, word_start = [], quote is None
-    index = 0
-    while index < len(command):
-        char = command[index]
-        if char == '\\' and quote != "'":
-            if command[index:index + 2] == '\\\n':
-                index += 2
+                # Numeric/control escapes vary across shells and locales. They
+                # are deliberately uncertain, rather than decoded approximately.
+                fail('Unsupported ANSI-C escape; use literal text or --body-file')
+            word.append(char)
+            i += 1
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                word.append(char)
+            i += 1
+            continue
+        if char == '\\':
+            if i + 1 == len(command):
+                fail('Incomplete shell escape')
+            following = command[i + 1]
+            if following == '\n':
+                i += 2
                 continue
-            output.append(command[index:index + 2])
-            word_start = False
-            index += 2
+            active = True
+            quoted = True
+            if quote == '"' and following not in '$`"\\':
+                word.append('\\')
+            word.append(following)
+            i += 2
             continue
         if quote:
             if char == quote:
                 quote = None
-        elif char in "'\"`":
-            quote = char
-            word_start = False
-        elif char == '#' and word_start:
-            newline = command.find('\n', index)
-            if newline == -1:
-                break
-            index = newline
+            else:
+                word.append(char)
+            i += 1
             continue
-        else:
-            word_start = char.isspace() or char in ';&|()<>'
-        output.append(char)
-        index += 1
-    return ''.join(output)
+        if command.startswith("$'", i):
+            active = quoted = True
+            quote = 'ansi'
+            i += 2
+            continue
+        if char in "'\"`":
+            active = quoted = True
+            quote = char
+            i += 1
+            continue
+        if char == '#' and not active:
+            end = command.find('\n', i)
+            i = len(command) if end == -1 else end
+            continue
+        if char in ' \t\r':
+            emit()
+            i += 1
+            continue
+        if char in ';&|()<>\n':
+            emit()
+            operator = char
+            i += 1
+            if char != '\n':
+                while i < len(command) and command[i] == char:
+                    operator += char
+                    i += 1
+                if operator == '<<' and command[i:i + 1] == '-':
+                    operator += '-'
+                    i += 1
+                elif operator in {'<', '>'} and command[i:i + 1] in {'&', '|', '>'}:
+                    operator += command[i]
+                    i += 1
+            if delimiter is not None:
+                fail('Missing heredoc delimiter')
+            tokens.append(ShellToken(operator, operator=True))
+            if operator in {'<<', '<<-'}:
+                delimiter = operator == '<<-'
+            if char == '\n':
+                for marker, strip_tabs, literal in pending:
+                    found = False
+                    while i < len(command):
+                        end = command.find('\n', i)
+                        end = len(command) if end == -1 else end + 1
+                        line = command[i:end]
+                        i = end
+                        while not literal and line.endswith('\n'):
+                            tail = line[:-1]
+                            if (len(tail) - len(tail.rstrip('\\'))) % 2 == 0:
+                                break
+                            end = command.find('\n', i)
+                            end = len(command) if end == -1 else end + 1
+                            line = line[:-2] + command[i:end]
+                            i = end
+                        candidate = line[:-1] if line.endswith('\n') else line
+                        if (candidate.lstrip('\t') if strip_tabs else candidate) == marker:
+                            found = True
+                            break
+                    if not found:
+                        fail('Unterminated heredoc')
+                pending.clear()
+            continue
+        active = True
+        word.append(char)
+        i += 1
+    if quote:
+        fail('Unterminated shell quote')
+    emit()
+    if delimiter is not None or pending:
+        fail('Unterminated heredoc')
+    return tokens
 
 
-def shell_segments(command):
-    """Tokenize direct shell segments without inspecting quoted program text."""
-    try:
-        source = without_heredoc_bodies(command)
-        lexer = shlex.shlex(source, posix=True, punctuation_chars=';&|()\n<>')
-        lexer.whitespace = ' \t\r'
-        lexer.whitespace_split = True
-        lexer.commenters = ''  # Keep comment-ending newlines as command separators.
-        tokens = list(lexer)
-    except ValueError:
-        return ''
+def token_segments(tokens):
     segments, segment = [], []
     for token in tokens:
-        if token and all(c in ';&|()\n' for c in token):
+        if token.operator and all(c in ';&|()\n' for c in token):
             if segment:
                 segments.append(segment)
             segment = []
@@ -230,6 +277,10 @@ def shell_segments(command):
     if segment:
         segments.append(segment)
     return segments
+
+
+def shell_segments(command):
+    return token_segments(shell_tokens(command))
 
 
 def push_boundary(words, repo=None):
@@ -377,7 +428,12 @@ def gh_boundary(words, repo=None):
 
 def shell_events(command):
     """Identify direct commands. PR boundaries must be isolated shell commands."""
-    segments = shell_segments(command)
+    parse_error = None
+    try:
+        segments = shell_segments(command)
+    except ShellParseError as exc:
+        segments = token_segments(exc.tokens)
+        parse_error = str(exc)
     kind, boundaries = '', []
     for words in segments:
         words = list(words)
@@ -426,7 +482,7 @@ def shell_events(command):
         if boundary:
             if environment:
                 boundary['error'] = 'Run PR boundaries without env or inline environment assignments'
-            if len(segments) != 1 or any(word in {'<', '>', '>>', '<<', '<<<', '<>', '>&', '<&'}
+            if len(segments) != 1 or any(word.operator and any(c in '<>' for c in word)
                                          for segment in segments for word in segment):
                 boundary['error'] = 'Run each PR boundary as a standalone shell command without redirection'
             boundaries.append(boundary)
@@ -440,6 +496,16 @@ def shell_events(command):
         if executable in {'python', 'python3', 'node', 'ruby', 'bash', 'sh', 'zsh',
                           'cp', 'mv', 'rm', 'mkdir', 'tee', 'touch', 'apply_patch'} and kind != 'release':
             kind = 'edit'  # Opaque scripts get a reminder, not a completion gate.
+    if parse_error:
+        # A failed parse is not evidence that the command contains no PR action.
+        # Inspect only on failure; valid quoted examples/heredocs stay advisory.
+        candidate = (boundaries
+                     or any(segment and Path(segment[0]).name in {'git', 'gh'}
+                            for segment in segments)
+                     or re.search(r'\b(?:git\s+push|gh\s+pr\s+(?:create|merge))\b', command))
+        if candidate:
+            return 'release', {'action': 'parse-error', 'repo': None,
+                               'error': 'PR command could not be parsed: ' + parse_error}
     # Always-gated PR/cleanup commands must not be hidden by a preceding ordinary push.
     boundary = max(boundaries, key=lambda item: 2 if item['action'] != 'push'
                    else int(item.get('delete', False)), default=None)
@@ -1031,6 +1097,9 @@ def handle(payload, engine, root):
                                else Path(command_cwd) / selected_cwd)
             command = str(args.get('command', args.get('cmd', '')))
             _, boundary = shell_events(command)
+    if boundary and boundary['action'] == 'parse-error':
+        return deny(boundary['error'] + '. Use a standalone direct command with literal '
+                    'arguments or --body-file; a new review receipt cannot repair shell syntax.')
     if boundary and boundary.get('delete'):
         blocked = check_cleanup(root, command_cwd, boundary)
         if blocked:

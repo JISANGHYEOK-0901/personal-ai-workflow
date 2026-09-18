@@ -425,6 +425,84 @@ class PRGateRegressions(unittest.TestCase):
                                     tool_input={'command': command})
                 self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
 
+    def test_static_quoted_arguments_match_bash_and_zsh(self):
+        executable_dir = self.root / 'bin'
+        executable_dir.mkdir()
+        gh = executable_dir / 'gh'
+        gh.write_text('#!/bin/sh\nprintf \'%s\\000\' gh "$@"\n')
+        gh.chmod(0o700)
+        # Operators, empty words, quote concatenation, ANSI escapes and literals
+        # all remain argv data. Shell execution only calls this printing stub.
+        values = ["';'", "'>'", "'&&'", "'|()'", "''", "'\n'", r'\;',
+                  '"a && b"', "pre'quoted'post", r'"a\q"',
+                  r"$'it\'s a title'", r"$'line\nnext\tend'", r"$'\\'",
+                  "'gh pr merge 17 --merge'", "'# comment'", 'word#part']
+        shells = ['/bin/bash']
+        if Path('/bin/zsh').exists():
+            shells.append('/bin/zsh')
+        for shell in shells:
+            for value in values:
+                with self.subTest(shell=shell, value=value):
+                    command = ('gh pr create --base develop --head feature --body test --title ' + value)
+                    run = subprocess.run([shell, '-c', command], capture_output=True, check=True,
+                                         env={**os.environ, 'PATH': str(executable_dir) + os.pathsep + os.environ['PATH']})
+                    actual = run.stdout.decode().split('\0')[:-1]
+                    self.assertEqual(HOOK.shell_segments(command), [actual])
+                    self.assert_allowed(command)
+        (self.repo / 'app.txt').write_text('unreviewed\n')
+        for value in values:
+            self.assert_denied('gh pr create --base develop --head feature --title ' + value)
+
+    def test_ansi_heredoc_cannot_hide_following_pr(self):
+        executable_dir = self.root / 'bin'
+        executable_dir.mkdir()
+        for name, body in [('gh', "printf 'gh-executed\\n'"), ('cat', 'exit 0')]:
+            path = executable_dir / name
+            path.write_text('#!/bin/sh\n' + body + '\n')
+            path.chmod(0o700)
+        for marker in ["$'EOF'", "E$'O'F", r"$'it\'s'"]:
+            decoded = "it's" if marker == r"$'it\'s'" else 'EOF'
+            literal = 'cat <<' + marker + '\ngh pr merge 17 --merge\n' + decoded + '\n'
+            self.assertIsNone(HOOK.shell_events(literal)[1])
+            command = literal + 'gh pr create --base develop --head feature'
+            for shell in ['/bin/bash', '/bin/zsh']:
+                if not Path(shell).exists():
+                    continue
+                with self.subTest(marker=marker, shell=shell):
+                    run = subprocess.run([shell, '-c', command], check=True, capture_output=True, text=True,
+                                         env={**os.environ, 'PATH': str(executable_dir) + os.pathsep + os.environ['PATH']})
+                    self.assertEqual(run.stdout, 'gh-executed\n')
+            self.assert_denied(command)
+
+    def test_uncertain_pr_parse_is_denied_for_both_engines(self):
+        commands = [
+            r"gh pr create --base develop --head feature --title $'\x41'",
+            "gh pr create --base develop --head feature --title 'unfinished",
+            "cat <<$'EO\\x46'\nbody\nEOF\ngh pr create --base develop --head feature",
+            "git push origin feature 'unfinished",
+            r"gh --repo $'\x41' pr create --base develop --head feature",
+            r"git -C $'\x41' push origin feature",
+            "gh pr merge 17 --help --body 'unfinished",
+        ]
+        for engine in ['codex', 'claude']:
+            for command in commands:
+                with self.subTest(engine=engine, command=command):
+                    output = HOOK.handle({'hook_event_name': 'PreToolUse', 'cwd': str(self.repo),
+                                          'tool_name': 'Bash', 'tool_input': {'command': command}},
+                                         engine, self.root)
+                    reason = output.get('hookSpecificOutput', {})
+                    self.assertEqual(reason.get('permissionDecision'), 'deny')
+                    self.assertIn('could not be parsed', reason.get('permissionDecisionReason', ''))
+        for command in ["cat 'unfinished", r"printf '%s' $'\x41'", "git status --short"]:
+            self.assertIsNone(HOOK.shell_events(command)[1])
+
+    def test_operator_metadata_keeps_actual_compound_commands_blocked(self):
+        for operator in [';', '&&', '|', '\n', '>', '>>', '2>']:
+            self.assert_denied('gh pr create --base develop --head feature ' + operator + ' cat')
+        # Several literal documents on one command line must end before gh.
+        command = "cat <<'A' <<$'B'\nfirst\nA\nsecond\nB\ngh pr create --base develop --head feature"
+        self.assert_denied(command)
+
 
 if __name__ == '__main__':
     unittest.main()
