@@ -100,10 +100,12 @@ def file_scope(paths, cwd):
 
 class ShellToken(str):
     """Decoded argument or an actual (unquoted) shell operator."""
-    def __new__(cls, value, operator=False, quoted=False):
+    def __new__(cls, value, operator=False, quoted=False, uncertain=False, io_number=False):
         token = super().__new__(cls, value)
         token.operator = operator
         token.quoted = quoted
+        token.uncertain = uncertain
+        token.io_number = io_number
         return token
 
 
@@ -120,20 +122,23 @@ def shell_tokens(command):
     outside the direct-command contract. Never execute input to classify it.
     """
     tokens, pending, word = [], [], []
-    active = quoted = False
+    active = quoted = uncertain = False
     quote = None
     delimiter = None
     i = 0
 
-    def emit():
-        nonlocal active, quoted, word, delimiter
+    def emit(io_number=False):
+        nonlocal active, quoted, uncertain, word, delimiter
         if active:
-            token = ShellToken(''.join(word), quoted=quoted)
+            token = ShellToken(''.join(word), quoted=quoted, uncertain=uncertain,
+                               io_number=io_number)
             tokens.append(token)
             if delimiter is not None:
+                if uncertain:
+                    raise ShellParseError('Uncertain heredoc delimiter', tokens)
                 pending.append((str(token), delimiter, token.quoted))
                 delimiter = None
-            active = quoted = False
+            active = quoted = uncertain = False
             word = []
 
     def fail(message):
@@ -159,8 +164,16 @@ def shell_tokens(command):
                     word.append(simple[escape])
                     i += 1
                     continue
-                # Numeric/control escapes vary across shells and locales. They
-                # are deliberately uncertain, rather than decoded approximately.
+                # Numeric escapes cannot close this quoted word or introduce an
+                # operator. Preserve an opaque value and finish reading the
+                # command structure, including later direct PR commands.
+                if escape in '01234567xuU':
+                    uncertain = True
+                    word.extend(('\\', escape))
+                    i += 1
+                    continue
+                # Other escapes can consume quote characters (e.g. \c'). Do not
+                # guess a recovery point when the quoting structure is unknown.
                 fail('Unsupported ANSI-C escape; use literal text or --body-file')
             word.append(char)
             i += 1
@@ -212,7 +225,12 @@ def shell_tokens(command):
             i += 1
             continue
         if char in ';&|()<>\n':
-            emit()
+            # An IO number is syntax only when unquoted and immediately before
+            # a redirection. Whitespace and quoted digits leave ordinary argv.
+            io_number = (char in '<>' and active and not quoted
+                         and re.fullmatch(r'(?:[0-9]+|\{[A-Za-z_][A-Za-z_0-9]*\})',
+                                          ''.join(word)) is not None)
+            emit(io_number=io_number)
             operator = char
             i += 1
             if char != '\n':
@@ -281,6 +299,31 @@ def token_segments(tokens):
 
 def shell_segments(command):
     return token_segments(shell_tokens(command))
+
+
+def command_arguments(segment):
+    """Separate argv from redirections before interpreting executable options."""
+    argv, redirections = [], []
+    index = 0
+    while index < len(segment):
+        token = segment[index]
+        if token.io_number:
+            index += 1
+            continue
+        if token.operator and any(char in '<>' for char in token):
+            if index + 1 == len(segment) or segment[index + 1].operator:
+                raise ShellParseError('Missing redirection target', segment)
+            redirections.append((token, segment[index + 1]))
+            index += 2
+            continue
+        argv.append(token)
+        index += 1
+    return argv, redirections
+
+
+def uncertain_shell(message):
+    return 'release', {'action': 'parse-error', 'repo': None,
+                       'error': 'Shell command could not be parsed safely: ' + message}
 
 
 def push_boundary(words, repo=None):
@@ -428,20 +471,25 @@ def gh_boundary(words, repo=None):
 
 def shell_events(command):
     """Identify direct commands. PR boundaries must be isolated shell commands."""
-    parse_error = None
     try:
         segments = shell_segments(command)
+        commands = [command_arguments(segment) for segment in segments]
     except ShellParseError as exc:
-        segments = token_segments(exc.tokens)
-        parse_error = str(exc)
+        # Unknown structure is not proof of a read-only command. Raw substring
+        # matching cannot establish that the unparsed suffix contains no PR.
+        return uncertain_shell(str(exc))
+    uncertain = any(token.uncertain for segment in segments for token in segment)
+    redirected = any(redirections for _, redirections in commands)
     kind, boundaries = '', []
-    for words in segments:
+    for words, _ in commands:
         words = list(words)
         environment = False
         if words and Path(words[0]).name == 'env':
             environment = True
             words.pop(0)
             while words and words[0].startswith('-'):
+                if words[0].uncertain:
+                    return uncertain_shell('Uncertain env option; use literal text')
                 option = words.pop(0)
                 if option in {'-u', '--unset', '-C', '--chdir'} and words:
                     words.pop(0)
@@ -450,7 +498,11 @@ def shell_events(command):
             words.pop(0)
         if not words:
             continue
+        if words[0].uncertain:
+            return uncertain_shell('Uncertain executable name; use literal text')
         executable = Path(words.pop(0)).name
+        if executable in {'git', 'gh'} and any(word.uncertain for word in words):
+            return uncertain_shell('Uncertain Git/GitHub argument; use literal text or --body-file')
         boundary = None
         if executable == 'git':
             repo_arg, unsafe_git = None, False
@@ -482,8 +534,7 @@ def shell_events(command):
         if boundary:
             if environment:
                 boundary['error'] = 'Run PR boundaries without env or inline environment assignments'
-            if len(segments) != 1 or any(word.operator and any(c in '<>' for c in word)
-                                         for segment in segments for word in segment):
+            if len(segments) != 1 or redirected:
                 boundary['error'] = 'Run each PR boundary as a standalone shell command without redirection'
             boundaries.append(boundary)
         if executable in {'railway', 'vercel', 'fly', 'flyctl', 'firebase', 'wrangler'}:
@@ -496,16 +547,8 @@ def shell_events(command):
         if executable in {'python', 'python3', 'node', 'ruby', 'bash', 'sh', 'zsh',
                           'cp', 'mv', 'rm', 'mkdir', 'tee', 'touch', 'apply_patch'} and kind != 'release':
             kind = 'edit'  # Opaque scripts get a reminder, not a completion gate.
-    if parse_error:
-        # A failed parse is not evidence that the command contains no PR action.
-        # Inspect only on failure; valid quoted examples/heredocs stay advisory.
-        candidate = (boundaries
-                     or any(segment and Path(segment[0]).name in {'git', 'gh'}
-                            for segment in segments)
-                     or re.search(r'\b(?:git\s+push|gh\s+pr\s+(?:create|merge))\b', command))
-        if candidate:
-            return 'release', {'action': 'parse-error', 'repo': None,
-                               'error': 'PR command could not be parsed: ' + parse_error}
+    if boundaries and uncertain:
+        return uncertain_shell('Uncertain argument in a command containing a PR action')
     # Always-gated PR/cleanup commands must not be hidden by a preceding ordinary push.
     boundary = max(boundaries, key=lambda item: 2 if item['action'] != 'push'
                    else int(item.get('delete', False)), default=None)

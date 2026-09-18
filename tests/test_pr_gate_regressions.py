@@ -72,6 +72,32 @@ class PRGateRegressions(unittest.TestCase):
         self.assertNotEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'),
                             'deny', (command, result))
 
+    def assert_shell_argv(self, command, expected):
+        """Run printing stubs and capture argv independently of shell redirection."""
+        executable_dir = self.root / 'argv-bin'
+        executable_dir.mkdir(exist_ok=True)
+        shell_cwd = self.root / 'shell-cwd'
+        shell_cwd.mkdir(exist_ok=True)
+        capture = self.root / 'shell-argv'
+        for name in ('git', 'gh', '2'):
+            stub = executable_dir / name
+            if not stub.exists():
+                stub.write_text('#!/bin/sh\n{ printf \'\\036\'; '
+                                'printf \'%s\\000\' "${0##*/}" "$@"; } >> "$PR_GATE_TEST_ARGV"\n')
+                stub.chmod(0o700)
+        environment = {**os.environ, 'PATH': str(executable_dir) + os.pathsep + os.environ['PATH'],
+                       'PR_GATE_TEST_ARGV': str(capture), 'LC_ALL': 'C'}
+        for shell in ('/bin/bash', '/bin/zsh'):
+            if not Path(shell).exists():
+                continue
+            with self.subTest(shell=shell):
+                capture.write_bytes(b'')
+                subprocess.run([shell, '-f', '-c', command], cwd=shell_cwd, env=environment,
+                               capture_output=True, check=True)
+                actual = [chunk.decode().split('\0')[:-1]
+                          for chunk in capture.read_bytes().split(b'\x1e')[1:]]
+                self.assertEqual(actual, expected[shell] if isinstance(expected, dict) else expected)
+
     def merged_state(self):
         self.git('switch', '-q', 'develop')
         self.git('merge', '--no-ff', '-qm', 'merge feature', 'feature')
@@ -482,7 +508,13 @@ class PRGateRegressions(unittest.TestCase):
             "git push origin feature 'unfinished",
             r"gh --repo $'\x41' pr create --base develop --head feature",
             r"git -C $'\x41' push origin feature",
+            r"$'\x67h' pr create --base develop --head feature",
+            r"gh $'\x70r' create --base develop --head feature",
+            r"git $'\x70ush' origin feature",
+            r"gh pr create --base develop --head feature $'--help\x3dfalse'",
+            r"env $'-\x75' UNUSED gh pr create --base develop --head feature",
             "gh pr merge 17 --help --body 'unfinished",
+            "cat 'unfinished",
         ]
         for engine in ['codex', 'claude']:
             for command in commands:
@@ -493,8 +525,93 @@ class PRGateRegressions(unittest.TestCase):
                     reason = output.get('hookSpecificOutput', {})
                     self.assertEqual(reason.get('permissionDecision'), 'deny')
                     self.assertIn('could not be parsed', reason.get('permissionDecisionReason', ''))
-        for command in ["cat 'unfinished", r"printf '%s' $'\x41'", "git status --short"]:
+        for command in [r"printf '%s' $'\x41'", "git status --short"]:
             self.assertIsNone(HOOK.shell_events(command)[1])
+
+    def test_redirection_positions_and_targets_preserve_direct_pr_boundaries(self):
+        families = (
+            ('gh', ['pr', 'create', '--base', 'develop', '--head', 'feature', '--title', 'audit', '--body', 'test']),
+            ('git', ['push', 'origin', 'feature']),
+        )
+        layouts = ('< /dev/null {command}', '2>/dev/null {command}',
+                   '2\\\n>/dev/null {command}', '{command} < /dev/null',
+                   '{command} 2> --help', '2> --dry-run {command}')
+        for executable, arguments in families:
+            forms = (executable, "'" + executable + "'", executable[0] + "'" + executable[1:] + "'",
+                     "$'" + executable + "'")
+            for form in forms:
+                for layout in layouts:
+                    command = layout.format(command=form + ' ' + ' '.join(arguments))
+                    with self.subTest(command=command):
+                        actual_argv = [[executable, *arguments]]
+                        if layout.startswith('2\\\n'):
+                            # Bash joins this fd prefix; Zsh invokes command `2`.
+                            # Gate conservatively: Bash can execute the PR command.
+                            actual_argv = {'/bin/bash': actual_argv,
+                                           '/bin/zsh': [['2', executable, *arguments]]}
+                        self.assert_shell_argv(command, actual_argv)
+                        parsed_argv, _ = HOOK.command_arguments(HOOK.shell_segments(command)[0])
+                        self.assertEqual(parsed_argv, [executable, *arguments])
+                        self.assert_denied(command)
+
+    def test_readonly_options_differ_from_redirection_filenames_and_fd_words(self):
+        (self.repo / 'app.txt').write_text('unreviewed\n')
+        create = 'gh pr create --base develop --head feature'
+        cases = (
+            ('< /dev/null gh pr create --help', [['gh', 'pr', 'create', '--help']], False),
+            ('gh pr create --help > --help', [['gh', 'pr', 'create', '--help']], False),
+            ('git push --dry-run origin feature 2> --dry-run',
+             [['git', 'push', '--dry-run', 'origin', 'feature']], False),
+            (create + ' 2> --help', [create.split()], True),
+            ('git push origin feature 2> --dry-run', [['git', 'push', 'origin', 'feature']], True),
+            ('2 >/dev/null ' + create, [['2', *create.split()]], False),
+            ("2''>/dev/null " + create, [['2', *create.split()]], False),
+        )
+        for command, argv, denied in cases:
+            with self.subTest(command=command):
+                self.assert_shell_argv(command, argv)
+                parsed_argv, _ = HOOK.command_arguments(HOOK.shell_segments(command)[0])
+                self.assertEqual([parsed_argv], argv)
+                if denied:
+                    self.assert_denied(command)
+                else:
+                    self.assert_allowed(command)
+
+    def test_uncertain_values_before_or_after_quoted_direct_commands_are_denied(self):
+        opaque = r"printf '%s' $'\x41'"
+        commands = (
+            ("'gh' 'pr' 'create' --base develop --head feature",
+             ['gh', 'pr', 'create', '--base', 'develop', '--head', 'feature']),
+            ("g'h' pr create --base develop --head feature",
+             ['gh', 'pr', 'create', '--base', 'develop', '--head', 'feature']),
+            ("$'git' $'push' origin feature", ['git', 'push', 'origin', 'feature']),
+            (r"g\it p\ush origin feature", ['git', 'push', 'origin', 'feature']),
+        )
+        for direct, argv in commands:
+            for command in (opaque + '; ' + direct, direct + '; ' + opaque):
+                with self.subTest(command=command):
+                    self.assert_shell_argv(command, [argv])
+                    for engine in ('codex', 'claude'):
+                        result = HOOK.handle({'hook_event_name': 'PreToolUse', 'cwd': str(self.repo),
+                                              'tool_name': 'Bash', 'tool_input': {'command': command}},
+                                             engine, self.root)
+                        self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'),
+                                         'deny', (engine, command, result))
+
+    def test_uncertain_readonly_values_do_not_promote_examples_to_pr_commands(self):
+        opaque = r"printf '%s' $'\x41'"
+        example = 'gh pr create --base develop --head feature'
+        cases = (
+            (opaque, []),
+            (opaque + " '" + example + "'", []),
+            (opaque + "; cat <<'EOF'\n" + example + '\nEOF\n', []),
+            ("cat <<'EOF'\n" + opaque + '; ' + example + '\nEOF\n', []),
+            ('git status --short', [['git', 'status', '--short']]),
+        )
+        for command, argv in cases:
+            with self.subTest(command=command):
+                self.assert_shell_argv(command, argv)
+                self.assert_allowed(command)
 
     def test_operator_metadata_keeps_actual_compound_commands_blocked(self):
         for operator in [';', '&&', '|', '\n', '>', '>>', '2>']:
