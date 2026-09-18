@@ -114,3 +114,12 @@
 - 실제 GitHub 읽기로 gh 선택 저장소·develop SHA 및 이미 MERGED인 PR #12의 새 JSON 필드를 확인했다. 설치된 런타임의 `cleanup_state`도 실제 PR #12와 fetch된 base에서 통과했다. 이 사전 검증은 읽기 전용으로 수행했으며 실제 PR 실행 결과는 해당 PR과 같은 작업 ID의 기록에 연결한다.
 - practice-skill·hongcafeapp·minjisuper에 설치하고 세 곳의 `--check`와 스킬 동기화 검사를 통과했다. 훅 런타임 SHA-256은 모두 `fcebb0ed55627b42b32ae2463ed5e152057827718f9f62d19b1d38e52cbb6c9d`이다. Codex `hooks/list`는 각 3개 이벤트, enabled=true, trustStatus=modified, 오류·경고 0으로 확인했다. 새 정의의 사용자 재신뢰 전 실제 Codex 적용은 대기 상태이며 신뢰 설정은 변경하지 않았다.
 - **한계:** 자동 검사는 합성 이벤트·Git 경계·설치 런타임의 증거이며 새 모델 세션의 판단 품질을 입증하지 않는다. PR 생성의 원격 조회 뒤 head가 바뀌는 경쟁, 임의 래퍼·웹·MCP와 비활성 훅은 여전히 범위 밖이다. merge는 `--match-head-commit`, 삭제는 정확한 SHA lease를 사용하며 서버 보호 미설정은 이번 작업에서 바꾸지 않았다.
+
+## 실사용 재점검 후 경계 회귀 보완 (2026-09-18)
+
+- 기준은 develop `e8bf004581c2d749ea530658cd403e7813231447` 위 `fix/pr-readiness-regressions` 변경이다. 기존 66개 테스트가 통과하던 상태에서 줄 연속 명령 파싱, SQLite 잠금 시 push 검사 누락, `EXPECTED` CI 허용, 도움말 오차단을 추가 재현해 보완했다.
+- 직접 명령의 backslash-newline과 도움말 옵션을 구분한다. 실제 `/bin/sh`의 출력 전용 실행 파일로 argv와 heredoc 뒤 명령 도달을 대조하고, 인용·주석·구분자 앞/중간/종료 줄 연속·홀짝 백슬래시·탭 제거 경계를 검사한다. 제목·본문 값인 `--help`, false 값, 도움말과 실제 쓰기가 섞인 명령은 검토를 면제하지 않는다.
+- Codex·Claude 실제 훅 CLI에 임시 Git·SQLite를 연결해 잠금·상태 손상·경계 누락의 증표 없는 push 차단과 유효 증표의 복구 경로를 확인했다. 정상 비PR 요청은 기존 상기를 유지한다. 독립 검토에서 발견한 prompt 필드 누락도 미확인으로 처리하고 회귀에 포함했다.
+- CI 합성 응답은 StatusContext의 `EXPECTED/PENDING`·실패·알 수 없는 값과 CheckRun의 미완료·결론 누락을 거부한다. 성공·허용된 완료 결론은 계속 통과한다. 실제 미완료 PR를 머지하는 검증은 하지 않았다.
+- 최종 전체 unittest **79개 PASS**(기존 66개 + 회귀 13개). 집중 검증은 communication 31개와 PR gate 26개 PASS. 스킬 동기화·저장소 정합성·공백 검사 PASS. 스킬 본문·저장 DB 형식·설치기 소유 계약은 변경하지 않았다.
+- **한계:** 새 모델 세션의 설명·검토 품질과 비용은 이 검사로 입증하지 않는다. Claude 시작 이벤트 자체가 유실되고 이전 상태만 남는 경우의 일반 push 의도 판별, 임의 래퍼·MCP·웹·비활성 훅, 조회 이후 경쟁의 기존 한계는 유지한다. 설치 전파·PR의 실제 원격 실행·재신뢰 상태는 같은 작업 ID의 기록과 해당 PR 결과에 연결한다.

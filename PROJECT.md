@@ -8,7 +8,7 @@
 - 실행 환경: 동기화 스크립트는 Python 3 표준 라이브러리만 사용. 실제 PHP·Next.js·Spring 애플리케이션은 이 저장소에 없음. `src/Main.java`는 기존 미추적 IDE 샘플이며 템플릿 검증 대상이 아님.
 - Git: 최신 개발·통합 기준과 기본 PR 대상은 develop. GitHub 기본 브랜치도 develop이며, origin은 personal-ai-workflow. main 반영은 별도 요청 시 처리한다. 현재 이력의 머지 방식은 merge commit. 정책 변경 지시가 없으면 이를 따른다. PR 머지 후 해당 작업 head의 로컬·원격 정리까지 완료 조건으로 삼는다. 이전 초기 push 승인을 무관한 외부 행동 권한으로 확대하지 않음.
 - 자원: 현재 구현은 로컬 파일·검사 범위. 유료 실험·외부 배포 한도는 미설정이며 필요 시 먼저 결정.
-- 선택형 훅: `hooks/communication.py` 정본을 `scripts/install_communication_hooks.py`로 Codex·Claude에 로컬 설치한다. 일반 전달 점검은 advisory이고, PR 요청 턴의 push와 직접 PR 생성·머지는 현재 base/HEAD 검토 증표를 요구한다. PR 경계 명령은 단독 실행하며 실제 head·remote를 대조한다. merge는 명시 PR 번호·원격 base/head·CI를 추가 확인하고, 삭제 push는 MERGED·원래 head·조건부 삭제에 연결된 별도 정리 증표를 요구한다. 절차·한계·활성화는 `docs/COMMUNICATION_HOOKS.md`. 집중 검증은 `python3 -m unittest discover -s tests -p 'test_communication_hooks.py' -v`와 `python3 -m unittest discover -s tests -p 'test_pr_gate_regressions.py' -v`; 전체 unittest에도 포함된다.
+- 선택형 훅: `hooks/communication.py` 정본을 `scripts/install_communication_hooks.py`로 Codex·Claude에 로컬 설치한다. 일반 전달 점검은 advisory이다. PR 요청 또는 요청 상태 미확인 시 push, 그리고 모든 직접 PR 생성·머지는 현재 base/HEAD 검토 증표를 요구한다. PR 경계 명령은 단독 실행하며 실제 head·remote를 대조한다. merge는 명시 PR 번호·원격 base/head·CI를 추가 확인하고, 삭제 push는 MERGED·원래 head·조건부 삭제에 연결된 별도 정리 증표를 요구한다. 절차·한계·활성화는 `docs/COMMUNICATION_HOOKS.md`. 집중 검증은 `python3 -m unittest discover -s tests -p 'test_communication_hooks.py' -v`와 `python3 -m unittest discover -s tests -p 'test_pr_gate_regressions.py' -v`; 전체 unittest에도 포함된다.
 - 기록: `docs/WORKLOG_POLICY.md`, 개인 데이터는 ai-input 전체 ignore.
 
 - 동시 작업: 정합성 CI는 PR·develop/main push에서 실행한다. 서버의 필수 체크·머지 큐는 아직 미설정. 동시 머지가 발생하면 SHA 재확인만으로 원자성을 주장하지 않고 pr-lifecycle의 조율 경계를 따른다. 작업 branch는 과업별 분리한다.

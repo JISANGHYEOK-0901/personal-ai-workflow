@@ -1,5 +1,6 @@
 import importlib.util
 from contextlib import closing, redirect_stdout
+import hashlib
 import io
 import json
 import os
@@ -44,6 +45,16 @@ class CommunicationTests(unittest.TestCase):
         payload = {'hook_event_name': event, 'session_id': 'session', 'turn_id': 'turn',
                    'cwd': str(self.root), **fields}
         return HOOK.handle(payload, engine, self.root)
+
+    def cli_event(self, event, engine='codex', **fields):
+        payload = {'hook_event_name': event, 'session_id': 'session', 'turn_id': 'turn',
+                   'cwd': str(self.root), **fields}
+        runtime = ROOT / 'hooks/communication.py'
+        result = subprocess.run([
+            sys.executable, str(runtime), '--root', str(self.root), '--engine', engine,
+            '--revision', hashlib.sha256(runtime.read_bytes()).hexdigest()],
+            input=json.dumps(payload), capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
 
     def edit(self, name, engine='codex'):
         return self.event('PreToolUse', engine, tool_name='Write', tool_input={'file_path': name})
@@ -152,6 +163,7 @@ class CommunicationTests(unittest.TestCase):
             self.assertNotEqual(HOOK.shell_kind(cmd), 'release', cmd)
 
     def test_release_reminder_is_separate_and_never_denies_tool(self):
+        self.event('UserPromptSubmit', prompt='일반 작업을 계속해줘')
         self.edit('src/a.py')
         args = {'tool_name': 'Bash', 'tool_input': {'command': 'git push origin feature'}}
         result = self.event('PreToolUse', **args)
@@ -288,6 +300,110 @@ class CommunicationTests(unittest.TestCase):
             blocked = merge(command)
         self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('unsuccessful CI', blocked['hookSpecificOutput']['permissionDecisionReason'])
+
+    def test_merge_requires_completed_known_ci_results(self):
+        repo = self.feature_repo()
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        remote = {'number': 17, 'state': 'OPEN', 'isDraft': False,
+                  'baseRefName': 'main', 'baseRefOid': receipt['base'],
+                  'headRefName': 'feature', 'headRefOid': receipt['head'],
+                  'mergeable': 'MERGEABLE', 'url': 'https://github.com/audit/sample/pull/17'}
+        cases = [({'state': state}, state == 'SUCCESS') for state in
+                 ('SUCCESS', 'EXPECTED', 'PENDING', 'ERROR', 'FAILURE', 'NEW_STATE', '')]
+        cases += [({'status': 'COMPLETED', 'conclusion': conclusion},
+                   conclusion in {'SUCCESS', 'NEUTRAL', 'SKIPPED'}) for conclusion in
+                  ('SUCCESS', 'NEUTRAL', 'SKIPPED', 'FAILURE', 'NEW_STATE', '')]
+        cases += [({}, False), ({'conclusion': 'SUCCESS'}, False)]
+        for check, allowed in cases:
+            with self.subTest(check=check), patch.object(
+                    HOOK, 'remote_pr_state', return_value={**remote, 'statusCheckRollup': [check]}):
+                result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                    'command': 'gh pr merge 17 --merge --match-head-commit ' + receipt['head']})
+                self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision') != 'deny',
+                                 allowed, result)
+
+    def test_push_unknown_prompt_state_requires_review(self):
+        repo = self.feature_repo()
+        fields = {'tool_name': 'Bash', 'cwd': str(repo),
+                  'tool_input': {'command': 'git push origin feature'}}
+        missing_boundaries = (
+            ('codex', {}), ('claude', {}), ('codex', {'session_id': None}),
+            ('claude', {'session_id': None}), ('codex', {'turn_id': None}),
+        )
+        for engine, missing in missing_boundaries:
+            with self.subTest(engine=engine, missing=missing):
+                result = self.event('PreToolUse', engine, **fields, **missing)
+                self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+        # A recorded ordinary prompt preserves advisory-only pushes on both engines.
+        for engine in ('codex', 'claude'):
+            self.event('UserPromptSubmit', engine, prompt='일반 작업을 계속해줘')
+            result = self.event('PreToolUse', engine, **fields)
+            self.assertNotEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        # An old ordinary prompt cannot waive review for a new Codex turn with no prompt record.
+        result = self.event('PreToolUse', **fields, turn_id='prompt-was-not-recorded')
+        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+        HOOK.record_review(self.root, repo, 'main', True, True, True)
+        result = self.event('PreToolUse', **fields, turn_id='prompt-was-not-recorded')
+        self.assertNotEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+
+    def test_missing_prompt_text_cannot_record_known_non_pr_intent(self):
+        repo = self.feature_repo()
+        for has_review in (False, True):
+            if has_review:
+                HOOK.record_review(self.root, repo, 'main', True, True, True)
+            for engine in ('codex', 'claude'):
+                for prompt in ({}, {'prompt': None}, {'prompt': 42}):
+                    session = engine + repr(prompt) + str(has_review)
+                    self.event('UserPromptSubmit', engine, session_id=session, **prompt)
+                    result = self.event('PreToolUse', engine, session_id=session, cwd=str(repo),
+                                        tool_name='Bash', tool_input={'command': 'git push origin feature'})
+                    self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision') != 'deny',
+                                     has_review, (engine, prompt, result))
+
+    def test_runtime_push_gate_survives_sqlite_lock_and_corrupt_state(self):
+        repo = self.feature_repo()
+        fields = {'tool_name': 'Bash', 'cwd': str(repo),
+                  'tool_input': {'command': 'git push origin feature'}}
+        path = HOOK.safe_state_path(self.root)
+        for engine in ('codex', 'claude'):
+            self.cli_event('UserPromptSubmit', engine, prompt='PR해줘')
+            baseline = self.cli_event('PreToolUse', engine, **fields)
+            self.assertEqual(baseline['hookSpecificOutput']['permissionDecision'], 'deny')
+            with closing(sqlite3.connect(path)) as lock:
+                lock.execute('BEGIN IMMEDIATE')
+                result = self.cli_event('PreToolUse', engine, **fields)
+                self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute("UPDATE sessions SET data='[]'")
+            result = self.cli_event('PreToolUse', engine, **fields)
+            self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute('DELETE FROM sessions')
+        path.write_bytes(b'private-corrupt-state')
+        for engine in ('codex', 'claude'):
+            result = self.cli_event('PreToolUse', engine, **fields)
+            self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+            self.assertNotIn('private-corrupt-state', json.dumps(result))
+            # Read-only tools still fail open when the advisory database is unavailable.
+            self.assertEqual(self.cli_event('PreToolUse', engine, tool_name='Bash',
+                                           tool_input={'command': 'git status'}), {})
+
+    def test_session_failure_can_use_valid_review_without_waiving_review(self):
+        repo = self.feature_repo()
+        fields = {'tool_name': 'Bash', 'cwd': str(repo),
+                  'tool_input': {'command': 'git push origin feature'}}
+        HOOK.record_review(self.root, repo, 'main', True, True, True)
+        for engine in ('codex', 'claude'):
+            self.event('UserPromptSubmit', engine, prompt='PR해줘')
+            for data in ('[]', '{}', '{"started":true,"pr_intent":"false"}'):
+                with self.subTest(engine=engine, data=data):
+                    with closing(sqlite3.connect(HOOK.safe_state_path(self.root))) as db, db:
+                        db.execute('UPDATE sessions SET data=?', (data,))
+                    result = self.cli_event('PreToolUse', engine, **fields)
+                    self.assertNotEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        (repo / 'app.txt').write_text('changed after review\n')
+        result = self.cli_event('PreToolUse', **fields)
+        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
 
     def test_parallel_events_only_emit_one_reminder_and_one_review(self):
         def call(_):

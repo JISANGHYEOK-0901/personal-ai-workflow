@@ -102,14 +102,30 @@ def without_heredoc_bodies(command):
     """Keep shell command lines while skipping literal here-document contents."""
     output, pending = [], []
     quote = None
-    for line in command.splitlines(keepends=True):
+    lines = iter(command.splitlines(keepends=True))
+    for line in lines:
         if pending:
-            delimiter, strip_tabs = pending[0]
+            delimiter, strip_tabs, quoted = pending[0]
+            # Unquoted heredocs fold escaped newlines before delimiter matching.
+            while not quoted and line.endswith('\n'):
+                tail = line[:-1]
+                if (len(tail) - len(tail.rstrip('\\'))) % 2 == 0:
+                    break
+                line = line[:-2] + next(lines, '')
             candidate = line.rstrip('\r\n')
             if (candidate.lstrip('\t') if strip_tabs else candidate) == delimiter:
                 pending.pop(0)
             output.append('\n')
             continue
+        logical_line = line
+        while True:
+            line = shell_command_text(logical_line, quote)
+            if not logical_line.endswith('\n') or line.endswith('\n'):
+                break
+            following = next(lines, '')
+            if not following:
+                break
+            logical_line += following
         output.append(line)
         index = 0
         while index < len(line):
@@ -126,8 +142,6 @@ def without_heredoc_bodies(command):
                 quote = char
                 index += 1
                 continue
-            if char == '#' and (index == 0 or line[index - 1].isspace()):
-                break
             if line.startswith('<<<', index):
                 index += 3
                 continue
@@ -153,18 +167,55 @@ def without_heredoc_bodies(command):
                 elif char.isspace() or char in ';&|()<>':
                     break
                 index += 1
-            marker = shlex.split(line[start:index], posix=True)
+            marker_source = line[start:index]
+            marker = shlex.split(marker_source, posix=True)
             if marker:
-                pending.append((marker[0], strip_tabs))
+                quoted = any(char in marker_source for char in "'\"\\")
+                pending.append((marker[0], strip_tabs, quoted))
+    return ''.join(output)
+
+
+def shell_command_text(command, quote=None):
+    """Remove shell continuations/comments without changing quoted data."""
+    output, word_start = [], quote is None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == '\\' and quote != "'":
+            if command[index:index + 2] == '\\\n':
+                index += 2
+                continue
+            output.append(command[index:index + 2])
+            word_start = False
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+            word_start = False
+        elif char == '#' and word_start:
+            newline = command.find('\n', index)
+            if newline == -1:
+                break
+            index = newline
+            continue
+        else:
+            word_start = char.isspace() or char in ';&|()<>'
+        output.append(char)
+        index += 1
     return ''.join(output)
 
 
 def shell_segments(command):
     """Tokenize direct shell segments without inspecting quoted program text."""
     try:
-        lexer = shlex.shlex(without_heredoc_bodies(command), posix=True, punctuation_chars=';&|()\n<>')
+        source = without_heredoc_bodies(command)
+        lexer = shlex.shlex(source, posix=True, punctuation_chars=';&|()\n<>')
         lexer.whitespace = ' \t\r'
         lexer.whitespace_split = True
+        lexer.commenters = ''  # Keep comment-ending newlines as command separators.
         tokens = list(lexer)
     except ValueError:
         return ''
@@ -185,12 +236,15 @@ def push_boundary(words, repo=None):
     """Accept one explicit destination and refspec; never infer push.default."""
     boundary = {'action': 'push', 'repo': repo, 'base': None, 'remote': None,
                 'refspec': None, 'lease': None, 'delete': False, 'error': None,
-                'cleanup_options': True, 'dry_run': False, 'unknown_option': False}
+                'cleanup_options': True, 'dry_run': False, 'help': False,
+                'unknown_option': False}
     positional = []
     flags = True
     for word in words:
         if flags and word == '--':
             flags = False
+        elif flags and word in {'-h', '--help'}:
+            boundary['help'] = True
         elif flags and word in {'--dry-run', '-n'}:
             boundary['dry_run'] = True
         elif flags and word.startswith('--force-with-lease='):
@@ -230,13 +284,24 @@ def gh_boundary(words, repo=None):
     """Parse documented direct create/merge options without interpreting body text."""
     words = list(words)
     overridden = False
+    help_requested = False
     error = None
 
     def global_option():
-        nonlocal overridden, error
+        nonlocal overridden, error, help_requested
         if not words:
             return False
         word = words[0]
+        option, separator, value = word.partition('=')
+        if option in {'-h', '--help'}:
+            if not separator or value in {'1', 't', 'T', 'true', 'TRUE', 'True'}:
+                help_requested = True
+            elif value in {'0', 'f', 'F', 'false', 'FALSE', 'False'}:
+                help_requested = False
+            else:
+                error = 'Invalid help flag value'
+            words.pop(0)
+            return True
         if word in {'-R', '--repo', '--hostname'}:
             overridden = True
             del words[:2]
@@ -307,7 +372,7 @@ def gh_boundary(words, repo=None):
     elif positionals:
         error = 'Use a single numeric PR number for merge and no positional target for create'
     boundary.update(remote_repo=overridden, error=error)
-    return boundary
+    return None if help_requested else boundary
 
 
 def shell_events(command):
@@ -348,7 +413,7 @@ def shell_events(command):
                         words.pop(0)
             if words and words[0] == 'push':
                 boundary = push_boundary(words[1:], repo_arg)
-                if boundary['dry_run'] and not boundary['unknown_option']:
+                if (boundary['dry_run'] or boundary['help']) and not boundary['unknown_option']:
                     boundary = None
                 else:
                     kind = 'release'
@@ -523,11 +588,12 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
         status = str(check.get('status', '')).upper()
         conclusion = str(check.get('conclusion', '')).upper()
         context_state = str(check.get('state', '')).upper()
-        if status and status != 'COMPLETED':
-            raise ValueError('The remote PR still has pending CI checks')
-        if conclusion and conclusion not in {'SUCCESS', 'NEUTRAL', 'SKIPPED'}:
-            raise ValueError('The remote PR has unsuccessful CI checks')
-        if context_state and context_state not in {'SUCCESS', 'EXPECTED'}:
+        if status or conclusion:
+            if status != 'COMPLETED':
+                raise ValueError('The remote PR still has pending CI checks')
+            if conclusion not in {'SUCCESS', 'NEUTRAL', 'SKIPPED'}:
+                raise ValueError('The remote PR has unsuccessful CI checks')
+        elif context_state != 'SUCCESS':
             raise ValueError('The remote PR has incomplete or unsuccessful CI checks')
     return state
 
@@ -883,6 +949,71 @@ def check_review(root, cwd, boundary):
             + command)
 
 
+def session_context(payload, engine, root):
+    """Return advisory output and True/False/None for this turn's PR intent."""
+    event = payload.get('hook_event_name')
+    session = payload.get('session_id')
+    if not isinstance(session, str) or not session:
+        return {}, None
+    if event == 'Stop' and (payload.get('stop_hook_active') or payload.get('background_tasks')
+                            or payload.get('session_crons')):
+        return {}, None
+    kind, groups, sensitive = classify(payload) if event == 'PreToolUse' else ('', set(), False)
+    if event == 'PreToolUse' and not kind:
+        return {}, None
+    prompt = payload.get('prompt')
+    requested_pr = pr_prompt(prompt) if isinstance(prompt, str) else None
+    # No transcript, prompt, answer, command, credentials, or raw path is persisted.
+    key = digest(engine + ':' + session)
+    with closing(sqlite3.connect(safe_state_path(root), timeout=0.2)) as db, db:
+        db.execute('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, turn TEXT, data TEXT, updated REAL)')
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('DELETE FROM sessions WHERE updated < ?', (time.time() - 14 * 86400,))
+        row = db.execute('SELECT turn, data FROM sessions WHERE id=?', (key,)).fetchone()
+        # Claude has no stable turn_id field. UserPromptSubmit establishes its boundary.
+        turn = payload.get('turn_id') if engine == 'codex' else None
+        if engine == 'codex' and (not isinstance(turn, str) or not turn):
+            return (context(event, START) if event == 'UserPromptSubmit' else {}), None
+        state = json.loads(row[1]) if row else {}
+        if (not isinstance(state, dict) or not isinstance(state.get('groups', []), list)
+                or any(not isinstance(group, str) for group in state.get('groups', []))):
+            raise ValueError('Invalid stored state')
+        if event == 'UserPromptSubmit':
+            if engine == 'claude':
+                turn = uuid.uuid4().hex
+            if not row or row[0] != turn:
+                state = {}
+        elif engine == 'claude':
+            if not row:
+                return {}, None  # No prompt boundary: don't reuse or invent a task.
+            turn = row[0]
+        elif not row or row[0] != turn:
+            state = {}
+        output = {}
+        if event == 'UserPromptSubmit' and not state.get('started'):
+            state['started'] = True
+            state['pr_intent'] = requested_pr
+            output = context(event, START + ('\n\n' + PR_REVIEW if requested_pr else ''))
+        elif event == 'PreToolUse':
+            state['groups'] = sorted(set(state.get('groups', [])) | groups)[:64]
+            state['sensitive'] = bool(state.get('sensitive') or sensitive or kind == 'release')
+            if not state.get(kind):
+                state[kind] = True
+                output = context(event, RELEASE if kind == 'release' else EDIT)
+        elif event == 'Stop':
+            needs_review = state.get('sensitive') or len(state.get('groups', [])) >= 2
+            if needs_review and not state.get('reviewed') and payload.get('last_assistant_message'):
+                state['reviewed'] = True
+                output = ({'decision': 'block', 'reason': FINISH} if engine == 'codex'
+                          else context('Stop', FINISH))
+        db.execute('INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?)',
+                   (key, turn, json.dumps(state), time.time()))
+    intent = state.get('pr_intent')
+    if state.get('started') is not True or not isinstance(intent, bool):
+        intent = None
+    return output, intent
+
+
 def handle(payload, engine, root):
     if not isinstance(payload, dict):
         return {}
@@ -908,63 +1039,15 @@ def handle(payload, engine, root):
         blocked = check_review(root, command_cwd, boundary)
         if blocked:
             return blocked
-    session = payload.get('session_id')
-    if not isinstance(session, str) or not session:
-        return {}
-    if event == 'Stop' and (payload.get('stop_hook_active') or payload.get('background_tasks')
-                            or payload.get('session_crons')):
-        return {}
-    kind, groups, sensitive = classify(payload) if event == 'PreToolUse' else ('', set(), False)
-    if event == 'PreToolUse' and not kind:
-        return {}
-    requested_pr = event == 'UserPromptSubmit' and pr_prompt(payload.get('prompt'))
-    # No transcript, prompt, answer, command, credentials, or raw path is persisted.
-    key = digest(engine + ':' + session)
-    with closing(sqlite3.connect(safe_state_path(root), timeout=0.2)) as db, db:
-        db.execute('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, turn TEXT, data TEXT, updated REAL)')
-        db.execute('BEGIN IMMEDIATE')
-        db.execute('DELETE FROM sessions WHERE updated < ?', (time.time() - 14 * 86400,))
-        row = db.execute('SELECT turn, data FROM sessions WHERE id=?', (key,)).fetchone()
-        # Claude has no stable turn_id field. UserPromptSubmit establishes its boundary.
-        turn = payload.get('turn_id') if engine == 'codex' else None
-        if engine == 'codex' and (not isinstance(turn, str) or not turn):
-            return context(event, START) if event == 'UserPromptSubmit' else {}
-        state = json.loads(row[1]) if row else {}
-        if (not isinstance(state, dict) or not isinstance(state.get('groups', []), list)
-                or any(not isinstance(group, str) for group in state.get('groups', []))):
-            raise ValueError('Invalid stored state')
-        if event == 'UserPromptSubmit':
-            if engine == 'claude':
-                turn = uuid.uuid4().hex
-            if not row or row[0] != turn:
-                state = {}
-        elif engine == 'claude':
-            if not row:
-                return {}  # No prompt boundary: don't reuse or invent a task.
-            turn = row[0]
-        elif not row or row[0] != turn:
-            state = {}
-        output = {}
-        if event == 'UserPromptSubmit' and not state.get('started'):
-            state['started'] = True
-            state['pr_intent'] = requested_pr
-            output = context(event, START + ('\n\n' + PR_REVIEW if requested_pr else ''))
-        elif event == 'PreToolUse':
-            state['groups'] = sorted(set(state.get('groups', [])) | groups)[:64]
-            state['sensitive'] = bool(state.get('sensitive') or sensitive or kind == 'release')
-            if not state.get(kind):
-                state[kind] = True
-                output = context(event, RELEASE if kind == 'release' else EDIT)
-        elif event == 'Stop':
-            needs_review = state.get('sensitive') or len(state.get('groups', [])) >= 2
-            if needs_review and not state.get('reviewed') and payload.get('last_assistant_message'):
-                state['reviewed'] = True
-                output = ({'decision': 'block', 'reason': FINISH} if engine == 'codex'
-                          else context('Stop', FINISH))
-        db.execute('INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?)',
-                   (key, turn, json.dumps(state), time.time()))
-    if (boundary and boundary['action'] == 'push' and not boundary.get('delete')
-            and state.get('pr_intent')):
+    ordinary_push = boundary and boundary['action'] == 'push' and not boundary.get('delete')
+    try:
+        output, intent = session_context(payload, engine, root)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError, sqlite3.Error):
+        if not ordinary_push:
+            raise  # Advisory errors remain fail open in main().
+        output, intent = {}, None
+    # Missing or unreadable prompt state cannot establish that review is unnecessary.
+    if ordinary_push and intent is not False:
         blocked = check_review(root, command_cwd, boundary)
         if blocked:
             return blocked

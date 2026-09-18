@@ -1,6 +1,7 @@
 """PR lifecycle regressions using local Git and mocked GitHub reads only."""
 import importlib.util
 from contextlib import closing
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -99,6 +100,165 @@ class PRGateRegressions(unittest.TestCase):
                 self.assert_denied(command)
         self.assert_allowed('gh pr create --base develop --head feature --title "A && B" --body-file /tmp/body.md')
         self.assert_allowed("cat <<'EOF'\ngh pr merge 999 --merge\nEOF")
+
+    def test_continued_direct_commands_require_the_same_review(self):
+        continuation = '\\\n'
+        commands = (
+            'git push ' + continuation + ' origin HEAD:refs/heads/feature',
+            'git ' + continuation + ' push origin feature',
+            'gi' + continuation + 't push origin feature',
+            'gh ' + continuation + ' pr create --base develop --head feature',
+            'gh pr ' + continuation + ' create --base develop --head feature',
+            'gh pr create --base ' + continuation + 'develop --head feature',
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assert_allowed(command)
+        (self.repo / 'app.txt').write_text('unreviewed change\n')
+        for command in commands:
+            with self.subTest(command=command):
+                self.assert_denied(command)
+
+    def test_continuation_tokens_match_actual_shell_arguments(self):
+        # These executables only print argv; no GitHub or Git writes can run.
+        executable_dir = self.root / 'bin'
+        executable_dir.mkdir()
+        for name in ('git', 'gh'):
+            executable = executable_dir / name
+            executable.write_text('#!/bin/sh\nprintf \'%s\\000\' "${0##*/}" "$@"\n')
+            executable.chmod(0o700)
+        continuation = '\\\n'
+        commands = (
+            'git ' + continuation + 'push origin feature',
+            'g' + continuation + 'h pr create --base develop --head feature',
+            'gh pr create --title "two' + continuation + ' words"',
+            "gh pr create --title 'literal " + continuation + "text'",
+            'gh pr create --title "# quoted" --body word#part',
+            '# comment ' + continuation + 'gh pr create --base develop --head feature',
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    ['/bin/sh', '-c', command], check=True, capture_output=True,
+                    env={**os.environ, 'PATH': str(executable_dir) + os.pathsep + os.environ['PATH']})
+                actual = result.stdout.decode().split('\0')[:-1]
+                self.assertEqual(HOOK.shell_segments(command), [actual])
+
+    def test_heredoc_and_comment_continuations_do_not_hide_commands(self):
+        continuation = '\\\n'
+        literal = "cat <<'EOF'\ngh " + continuation + 'pr merge 999 --merge\nEOF'
+        self.assert_allowed(literal)
+        _, boundary = HOOK.shell_events(literal)
+        self.assertIsNone(boundary)
+        self.assert_denied(literal + '\ngh pr create --base develop --head feature')
+        self.assert_denied('echo before # comment ' + continuation
+                           + 'gh pr create --base develop --head feature')
+
+    def test_continued_heredoc_delimiters_preserve_following_boundary(self):
+        executable_dir = self.root / 'bin'
+        executable_dir.mkdir()
+        for name, body in (('cat', 'exit 0'), ('gh', "printf 'direct-gh-command\\n'")):
+            executable = executable_dir / name
+            executable.write_text('#!/bin/sh\n' + body + '\n')
+            executable.chmod(0o700)
+        continuation = '\\\n'
+        headers = (
+            'cat <<' + continuation + "'EOF'\n",
+            'cat <<EO' + continuation + 'F\n',
+            'cat ' + continuation + "<<'EOF'\n",
+            "cat <<'EOF' " + continuation + '# comment\n',
+            'cat word\\ #part ' + continuation + "<<'EOF'\n",
+        )
+        for header in headers:
+            with self.subTest(header=header):
+                literal = header + 'gh ' + continuation + 'pr merge 999 --merge\nEOF\n'
+                self.assertIsNone(HOOK.shell_events(literal)[1])
+                command = literal + 'gh pr create --base develop --head feature'
+                result = subprocess.run(
+                    ['/bin/sh', '-c', command], check=True, capture_output=True, text=True,
+                    env={**os.environ, 'PATH': str(executable_dir) + os.pathsep + os.environ['PATH']})
+                self.assertEqual(result.stdout, 'direct-gh-command\n')
+                self.assert_denied(command)
+
+    def test_heredoc_end_continuations_follow_delimiter_quoting(self):
+        executable_dir = self.root / 'bin'
+        executable_dir.mkdir()
+        for name, body in (('cat', 'exit 0'), ('gh', "printf 'direct-gh-command\\n'")):
+            executable = executable_dir / name
+            executable.write_text('#!/bin/sh\n' + body + '\n')
+            executable.chmod(0o700)
+        continuation = '\\\n'
+        cases = (
+            ('EOF', 'EO' + continuation + 'F\n', True),
+            ('EOF', 'E' + continuation + 'O' + continuation + 'F\n', True),
+            ("'EOF'", 'EO' + continuation + 'F\n', False),
+            ('"EOF"', 'EO' + continuation + 'F\n', False),
+            ('EO\\F', 'EO' + continuation + 'F\n', False),
+            ("EO''F", 'EO' + continuation + 'F\n', False),
+            ('EOF', 'EO\\' + continuation + 'F\n', False),
+            ('-EOF', '\tEO' + continuation + 'F\n', True),
+            ('-EOF', 'EO' + continuation + '\tF\n', False),
+        )
+        for delimiter, ending, executes in cases:
+            with self.subTest(delimiter=delimiter, ending=ending):
+                command = ('cat <<' + delimiter + '\nbody\n' + ending
+                           + 'gh pr create --base develop --head feature\n')
+                if not executes:
+                    command += 'EOF\n'
+                result = subprocess.run(
+                    ['/bin/sh', '-c', command], check=True, capture_output=True, text=True,
+                    env={**os.environ, 'PATH': str(executable_dir) + os.pathsep + os.environ['PATH']})
+                self.assertEqual(result.stdout, 'direct-gh-command\n' if executes else '')
+                if executes:
+                    self.assert_denied(command)
+                else:
+                    self.assertIsNone(HOOK.shell_events(command)[1])
+                    self.assert_allowed(command)
+
+    def test_help_flags_do_not_require_review_or_remote_reads(self):
+        (self.repo / 'app.txt').write_text('unreviewed change\n')
+        commands = (
+            'gh pr create --help', 'gh pr merge -h',
+            'gh pr merge 17 --help', 'gh pr create --help=true',
+            'gh --help=1 pr create', 'gh pr --help=T merge',
+            'gh pr create --help=false --help',
+            'git push -h', 'git push --help', 'git push origin feature -h',
+        )
+        with patch.object(HOOK, 'remote_pr_state', side_effect=AssertionError('Help queried GitHub')):
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertEqual(HOOK.shell_events(command), ('', None))
+                    self.assert_allowed(command)
+
+    def test_help_option_values_and_false_flags_keep_review_gate(self):
+        (self.repo / 'app.txt').write_text('unreviewed change\n')
+        create = 'gh pr create --base develop --head feature '
+        commands = (
+            create + '--title --help', create + '--body "--help"',
+            create + '--title=--help', create + '-t--help',
+            create + '--body-file --help', create + '--help=false',
+            create + '--help=0', create + '--help=true --help=False',
+            'gh --help=false pr create --base develop --head feature',
+            'gh pr --help=f create --base develop --head feature',
+            create + '-- --help',
+            'gh pr merge 17 --body --help --match-head-commit ' + self.head,
+            'git push --push-option --help origin feature',
+            'git push --repo --help origin feature',
+            'git push -- origin --help',
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assert_denied(command)
+
+    def test_help_does_not_exempt_other_commands_in_the_same_shell(self):
+        for command in (
+            'gh pr create --help && gh pr create --base develop --head feature',
+            'gh pr create --base develop --head feature && gh pr create --help',
+            'git push -h; git push origin feature',
+            'git push origin feature; gh pr merge --help',
+        ):
+            with self.subTest(command=command):
+                self.assert_denied(command)
 
     def test_create_requires_explicit_head_even_with_different_tracking_branch(self):
         self.git('update-ref', 'refs/remotes/origin/other', self.head)
