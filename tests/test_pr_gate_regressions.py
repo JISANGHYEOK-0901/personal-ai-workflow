@@ -205,8 +205,9 @@ class PRGateRegressions(unittest.TestCase):
                            + 'gh pr create --base develop --head feature\n')
                 if not executes:
                     command += 'EOF\n'
+                # Bash folds these delimiter lines; Ubuntu's /bin/sh (dash) does not.
                 result = subprocess.run(
-                    ['/bin/sh', '-c', command], check=True, capture_output=True, text=True,
+                    ['/bin/bash', '-c', command], check=True, capture_output=True, text=True,
                     env={**os.environ, 'PATH': str(executable_dir) + os.pathsep + os.environ['PATH']})
                 self.assertEqual(result.stdout, 'direct-gh-command\n' if executes else '')
                 if executes:
