@@ -10,6 +10,8 @@
 - 자원: 현재 구현은 로컬 파일·검사 범위. 유료 실험·외부 배포 한도는 미설정이며 필요 시 먼저 결정.
 - 선택형 훅: `hooks/communication.py` 정본을 `scripts/install_communication_hooks.py`로 Codex·Claude에 로컬 설치한다. 일반 전달 점검은 advisory이다. PR 요청 또는 요청 상태 미확인 시 push, 그리고 모든 직접 PR 생성·머지는 현재 base/HEAD 검토 증표를 요구한다. PR 경계 명령은 단독 실행하며 실제 head·remote를 대조한다. merge는 명시 PR 번호·원격 base/head·CI를 추가 확인하고, 삭제 push는 MERGED·원래 head·조건부 삭제에 연결된 별도 정리 증표를 요구한다. 절차·한계·활성화는 `docs/COMMUNICATION_HOOKS.md`. 집중 검증은 `python3 -m unittest discover -s tests -p 'test_communication_hooks.py' -v`와 `python3 -m unittest discover -s tests -p 'test_pr_gate_regressions.py' -v`; 전체 unittest에도 포함된다.
 - 기록: `docs/WORKLOG_POLICY.md`, 개인 데이터는 ai-input 전체 ignore.
+- 훅 설치 범위: 실제 대상이 설치 작업공간 밖이면 검사·알림·상태 기록을 건너뛴다. `workdir`·`git -C`·외부 `cd … && gh …`와 symlink를 반영하며 내부 대상과 판별 불가는 기존 PR 조건을 유지한다. 자동 `<task-notification>`은 직전 사용자 의도를 이어받는다. 회귀 검증은 `tests/test_hook_scope.py`에 포함한다.
+- UI 변경 검증: 설치 범위 내 UI 변경은 현재 입력 해시에 연결된 Playwright 보고서·조작·스크린샷 근거가 있어야 Stop과 PR 경계를 통과한다. 프로젝트별 `.workflow-ui.json`의 paths/inputs/command/base로 설정하고 `--verify-ui`로 실행한다. 실제 실행 불가는 명시 미완료로만 종료하며 PR은 계속 차단한다. 회귀 검증: `tests/test_ui_gate.py`.
 
 - 동시 작업: 정합성 CI는 PR·develop/main push에서 실행한다. 서버의 필수 체크·머지 큐는 아직 미설정. 동시 머지가 발생하면 SHA 재확인만으로 원자성을 주장하지 않고 pr-lifecycle의 조율 경계를 따른다. 작업 branch는 과업별 분리한다.
 
