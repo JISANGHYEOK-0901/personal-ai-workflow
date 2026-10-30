@@ -6,11 +6,19 @@
 
 ## 실행 시점과 범위
 
+설치한 작업공간 내부에만 적용한다. 실제 대상이 범위 밖으로 확인되면 PR·정리 게이트, 일반 알림, SQLite 상태 기록을 모두 건너뛴다. 세션 cwd뿐 아니라 `exec_command.workdir`, 단일 `git -C`, 경로 정규화와 심볼릭 링크를 반영한다. 따라서 외부 cwd에서 내부 저장소를 지정한 명령은 계속 검사한다. 외부 저장소에서 `gh`를 실행할 때는 `cd /external/repo && gh pr …`도 범위 밖으로 판별한다. 내부 PR 경계의 단독 실행·원격 대상·증표 조건은 그대로 유지한다.
+
+동적 경로, 미지원 셸 구조처럼 실제 대상을 확정할 수 없는 명령은 범위 밖이라고 추정해 면제하지 않는다. 내부 저장소에서 `gh -R/--repo`나 `GH_REPO`로 대상을 바꾸는 경로도 기존 제한을 유지한다. 이 로컬 범위 판정은 임의 스크립트·래퍼의 내부 실행을 추적하는 보안 격리가 아니다.
+
+범위 밖 사용자 입력은 상태로 저장하지 않으므로, 외부 cwd에서 `workdir`/`git -C`로 내부 저장소를 지정한 일반 push는 이전 비PR 의도를 재사용하지 않고 미확인으로 검사한다. 현재 내부 저장소의 유효한 검토 증표가 있으면 통과한다.
+
+`<task-notification>`으로 시작하는 자동 완료 알림은 새 사용자 요청으로 취급하지 않는다. START·PR_REVIEW를 추가하지 않고 직전 사용자 턴의 PR 의도를 유지한다. 이전 사용자 상태가 없으면 일반 push의 의도는 여전히 미확인이며 내부 저장소의 기존 검토 조건을 적용한다.
+
 | 이벤트 | 동작 | 반복·중단 제한 |
 |---|---|---|
 | UserPromptSubmit | 초기 조사 뒤 중요 영향·미결사항·권장안을 의존 실행 전에 사용자에게 전달하도록 상기 | 사용자 입력당 짧은 컨텍스트 1회. 단순 질문·국소 수정은 형식적 목록·질문 제외 |
 | PreToolUse | 직접 편집·외부 반영 상기. PR 요청 또는 요청 상태 미확인 시 일반 `git push`, 모든 직접 `gh pr create/merge`에서 검토 증표 확인. 삭제 push는 별도 정리 증표 확인 | 일반 상기는 종류별 1회. 증표·실제 대상·원격 상태를 확인하지 못하면 해당 명령 거부 |
-| Stop | 여러 코드 디렉터리 또는 데이터·API·배포 관련 변경 시도가 있으면 인계 내용 재점검 | 턴당 최대 1회 이어서 응답. stop_hook_active, 백그라운드 작업·예약 대기 때 재개하지 않음 |
+| Stop | 여러 코드 디렉터리 또는 데이터·API·배포 관련 변경 시도가 있으면 인계 내용 재점검. UI 변경은 최신 Playwright 증거 검사 | 일반 전달 상기는 턴당 최대 1회. UI 게이트는 stop_hook_active에서도 검사. 백그라운드 작업·예약 대기는 제외 |
 
 전달 대상은 미확인 사실뿐 아니라 **이미 확인됐지만 사용자의 선택을 바꾸는 영향**도 포함한다. 직접 조사할 사실은 조사하고, 실제 사용자 선택이 필요한 항목만 묶어 질문한다. 이미 받은 결정은 재사용한다. 알려진 중요 미결사항에 의존하는 후속 실행만 보류하며 독립 작업은 계속한다. 이 판단은 에이전트의 책임이고 훅이 기계적으로 집행하지 않는다.
 
@@ -143,3 +151,42 @@ python3 -m unittest discover -s tests -p 'test_communication_hooks.py' -v
 5. 추가 응답 수·시간·토큰과 놓친 사례·불필요한 개입을 함께 기록하는가.
 
 근거: [Codex Hooks](https://learn.chatgpt.com/docs/hooks), [Claude Code Hooks](https://code.claude.com/docs/en/hooks). 문서와 설치 검사 통과를 새 세션 실사용 성공으로 대체하지 않는다.
+
+
+## UI 변경의 Playwright 검증
+
+설치 작업공간에서 UI를 바꾸면 완료(Stop)와 직접 push·PR 생성·머지 전에 현재 소스에 연결된 브라우저 검증 증거를 요구한다. 설치 범위 밖은 이 게이트도 실행하지 않는다. 기본 감지는 HTML/CSS/JSX/TSX/Vue/Svelte와 web/frontend/dashboard/public 등 UI 경로다. 프로젝트의 실제 경로·관련 계약·검증 명령은 `.workflow-ui.json`으로 좁힌다. 스킬은 브라우저 검증 기준을 전달하고, 훅이 설치된 프로젝트의 완료·PR 경계에서 누락을 막는다.
+
+```json
+{
+  "paths": ["dashboard/public/**"],
+  "inputs": ["dashboard/*.mjs", "lib/**", "scripts/verify-ui.mjs", "package*.json"],
+  "base": "main",
+  "command": ["npm", "run", "verify:ui", "--", "--report", "{report}"]
+}
+```
+
+검증 명령은 argv 배열이며 셸을 자동 실행하지 않는다. `{report}`는 설치 작업공간의 무시되는 `ai-input/ui-validation/<실행 id>/report.json`으로 치환한다. 기존 프로젝트의 검증 스크립트가 실제 Playwright로 앱을 열고 조작·assertion·스크린샷·콘솔/네트워크를 검사하여 다음 계약을 출력해야 한다. 아래는 계약 예시이며 파일을 직접 만들어 검증을 대신하지 않는다.
+
+```json
+{
+  "framework": "playwright",
+  "passed": true,
+  "checks": [{"name": "목록을 펼쳐 위치와 선택 확인", "interaction": "click", "passed": true}],
+  "screenshots": [{"path": "desktop-open.png", "viewport": {"width": 1440, "height": 1000}}],
+  "consoleErrors": [],
+  "networkErrors": []
+}
+```
+
+프로젝트의 개발 의존성을 설치하고 필요한 브라우저를 준비한 뒤 실행한다. 운영 앱에 Playwright를 런타임 의존성으로 추가할 필요는 없다.
+
+```bash
+python3 .workflow-hooks/communication.py --root /path/to/workspace --verify-ui
+```
+
+훅은 명령의 실제 종료 코드, 모든 assertion 통과, click/keyboard/touch 중 실제 조작, PNG·viewport 근거, 브라우저 오류 없음과 실행 전후 입력 해시 일치를 확인한다. 증표는 `.workflow-hooks/ui-receipt.json`에 비공개 권한으로 저장하고 보고서·이미지의 해시도 묶는다. 유효 기간은 24시간이며 UI·관련 입력·보고서·이미지가 바뀌면 다시 실행한다. Stop은 현재 dirty UI와 사용자 턴 시작 이후의 UI 내용 변화를 확인하여 중간 커밋으로 검사를 피하지 못하게 한다. PR은 base 대비 커밋된 UI도 확인한다. base를 생략하면 origin/HEAD, origin/develop/main, develop/main/master, HEAD 순으로 존재하는 기준을 사용하므로 프로젝트가 실제 PR base를 명시하는 편이 좋다.
+
+목록·모달 UI는 실제 펼친 상태를 확인한다. `selectOption`만으로 선택값을 바꾸는 검사는 펼침 위치·크기·가림 문제를 검증하지 못한다. 지원하는 대표 데스크톱·모바일 크기와 테마에서 스크린샷을 에이전트가 읽고 판단한다. 기계 게이트는 테스트 스크립트의 의미적 정확성·시각 품질까지 판정하지 않으며, 프로젝트의 검증 명령을 신뢰한다. 로컬 훅 비활성화·임의 스크립트 우회도 보안 격리하지 않는다.
+
+브라우저 미설치 등으로 검증할 수 없으면 완료로 보고하지 않는다. `UI_VALIDATION_BLOCKED: <원인과 재개 조건>`으로 시작하는 명시 미완료 보고만 Stop을 종료할 수 있으며 PR 게이트는 계속 유지된다. 일반 전달 상기의 `stop_hook_active` 면제는 UI 검증에 적용하지 않는다. 새 훅 리비전은 설치기를 다시 실행해 갱신하고, 도구의 기존 훅 신뢰 절차를 따른다.

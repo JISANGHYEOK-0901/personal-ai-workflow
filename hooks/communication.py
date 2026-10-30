@@ -2,6 +2,7 @@
 """Communication reminders and a local PR diff-review gate; no model calls."""
 import argparse
 from contextlib import closing
+import fnmatch
 import hashlib
 import json
 import os
@@ -78,10 +79,112 @@ def pr_prompt(value):
                 or re.search(action + r'.{0,30}' + subject, value, re.I | re.S))
 
 
-def file_scope(paths, cwd):
+def task_notification(payload):
+    prompt = payload.get('prompt')
+    return (payload.get('hook_event_name') == 'UserPromptSubmit'
+            and isinstance(prompt, str)
+            and bool(re.match(r'^\s*<task-notification(?:\s|>)', prompt)))
+
+
+def scoped_path(root, cwd, value=None):
+    """True/False for a literal local path; None when its target is unknown."""
+    candidate = value if value is not None else cwd
+    if not isinstance(candidate, (str, Path)) or not str(candidate):
+        return None
+    if any(char in str(candidate) for char in '$`~\x00'):
+        return None
+    try:
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = Path(cwd) / path
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def outside_installation(payload, root):
+    """Skip only targets proven external, before receipts, reminders or state writes.
+
+    Directory changes are followed only through literal `cd DIR && ...` prefixes.
+    Ambiguous shell structure stays subject to the existing fail-closed PR gate.
+    """
+    cwd = payload.get('cwd')
+    if not isinstance(cwd, str) or not cwd:
+        return False
+    if payload.get('hook_event_name') != 'PreToolUse':
+        return scoped_path(root, cwd) is False
+    name, args = payload.get('tool_name'), payload.get('tool_input', {})
+    if not isinstance(args, dict):
+        return False
+    if name in {'Write', 'Edit', 'MultiEdit'}:
+        return scoped_path(root, cwd, args.get('file_path')) is False
+    if name == 'apply_patch':
+        paths = re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
+                           str(args.get('command', args.get('patch', ''))), re.M)
+        return bool(paths) and all(scoped_path(root, cwd, path) is False for path in paths)
+    if name not in {'Bash', 'exec_command'}:
+        return scoped_path(root, cwd) is False
+    if name == 'exec_command' and isinstance(args.get('workdir'), str):
+        selected = Path(args['workdir'])
+        cwd = str(selected if selected.is_absolute() else Path(cwd) / selected)
+    command = str(args.get('command', args.get('cmd', '')))
+    try:
+        tokens = shell_tokens(command)
+        # Subshells, pipelines and disjunctions cannot establish one effective cwd.
+        if any(token.uncertain or (token.operator and str(token) in {'(', ')', '|', '||', '&'})
+               for token in tokens):
+            return False
+        segments = token_segments(tokens)
+        targets = []
+        for segment in segments:
+            words, redirections = command_arguments(segment)
+            if not words:
+                return False
+            if redirections:
+                targets.extend(scoped_path(root, cwd, target) for _, target in redirections)
+            executable, *words = words
+            if any(char in executable for char in '$`'):
+                return False
+            if executable == 'cd':
+                if words[:1] == ['--']:
+                    words = words[1:]
+                index = next(i for i, token in enumerate(tokens) if token is segment[-1])
+                if len(words) != 1 or index + 1 >= len(tokens) or tokens[index + 1] != '&&':
+                    return False
+                if scoped_path(root, cwd, words[0]) is None:
+                    return False
+                selected = Path(words[0])
+                cwd = str(selected if selected.is_absolute() else Path(cwd) / selected)
+                continue
+            candidate = cwd
+            if Path(executable).name == 'git':
+                directory = None
+                while words and words[0].startswith('-'):
+                    option = words.pop(0)
+                    if option == '-C' and words:
+                        value = words.pop(0)
+                    elif option.startswith('-C') and len(option) > 2:
+                        value = option[2:]
+                    else:
+                        return False
+                    if directory is not None:
+                        return False
+                    directory = value
+                candidate = directory if directory is not None else cwd
+            if Path(executable).name == 'env' or re.match(r'^[A-Za-z_][A-Za-z_0-9]*=', executable):
+                return False
+            targets.append(scoped_path(root, cwd, candidate))
+        return bool(targets) and all(target is False for target in targets)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def file_scope(paths, cwd, root=None):
     """Structural hints only. Neither paths nor content establish semantic risk."""
     groups, sensitive = set(), False
     for value in paths:
+        if root is not None and scoped_path(root, cwd, value) is False:
+            continue
         path = Path(value)
         path = Path(cwd) / path if not path.is_absolute() else path
         parts = {p.lower() for p in path.parts}
@@ -559,7 +662,7 @@ def shell_kind(command):
     return shell_events(command)[0]
 
 
-def classify(payload):
+def classify(payload, root=None):
     name, args = payload.get('tool_name'), payload.get('tool_input', {})
     if not isinstance(args, dict):
         return '', set(), False
@@ -572,7 +675,7 @@ def classify(payload):
     elif name in {'Edit', 'Write', 'MultiEdit'}:
         if isinstance(args.get('file_path'), str):
             paths = [args['file_path']]
-    groups, sensitive = file_scope(paths, payload.get('cwd', '.'))
+    groups, sensitive = file_scope(paths, payload.get('cwd', '.'), root)
     return ('edit' if groups else ''), groups, sensitive
 
 
@@ -709,9 +812,7 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
 
 def resolve_repo(root, cwd, hint=None):
     root = root.resolve()
-    candidate = Path(hint) if hint else Path(cwd)
-    if not candidate.is_absolute():
-        candidate = Path(cwd) / candidate
+    candidate = repository_candidate(cwd, hint)
     top, _ = git_output(candidate, 'rev-parse', '--show-toplevel')
     repo = Path(top.decode().strip()).resolve()
     try:
@@ -719,6 +820,11 @@ def resolve_repo(root, cwd, hint=None):
     except ValueError as exc:
         raise ValueError('Repository is outside the installed workspace') from exc
     return repo
+
+
+def repository_candidate(cwd, hint=None):
+    candidate = Path(hint) if hint else Path(cwd)
+    return Path(cwd) / candidate if not candidate.is_absolute() else candidate
 
 
 def commit_sha(repo, revision):
@@ -989,7 +1095,7 @@ def check_cleanup(root, cwd, boundary):
         try:
             repo = resolve_repo(root, cwd, boundary.get('repo'))
         except (OSError, TypeError, ValueError, subprocess.SubprocessError):
-            repo = Path(cwd)
+            repo = repository_candidate(cwd, boundary.get('repo'))
         return deny('PR cleanup gate blocked this command: ' + (str(exc) or 'Cleanup state unavailable')
                     + '. Fetch the merged base and record separate cleanup evidence; a PR diff review '
                     'receipt cannot authorize branch deletion. Retry after:\n'
@@ -1047,7 +1153,7 @@ def check_review(root, cwd, boundary):
             repo = resolve_repo(root, cwd, boundary.get('repo'))
             command = review_record_command(root, repo)
         except (OSError, TypeError, ValueError, subprocess.SubprocessError):
-            command = review_record_command(root, Path(cwd))
+            command = review_record_command(root, repository_candidate(cwd, boundary.get('repo')))
         reason = str(exc) or 'PR review state could not be verified'
         return deny(
             'PR diff review gate blocked this command: ' + reason + '. Fetch the actual base, read '
@@ -1067,9 +1173,10 @@ def session_context(payload, engine, root):
     if event == 'Stop' and (payload.get('stop_hook_active') or payload.get('background_tasks')
                             or payload.get('session_crons')):
         return {}, None
-    kind, groups, sensitive = classify(payload) if event == 'PreToolUse' else ('', set(), False)
+    kind, groups, sensitive = classify(payload, root) if event == 'PreToolUse' else ('', set(), False)
     if event == 'PreToolUse' and not kind:
         return {}, None
+    notification = task_notification(payload)
     prompt = payload.get('prompt')
     requested_pr = pr_prompt(prompt) if isinstance(prompt, str) else None
     # No transcript, prompt, answer, command, credentials, or raw path is persisted.
@@ -1082,11 +1189,18 @@ def session_context(payload, engine, root):
         # Claude has no stable turn_id field. UserPromptSubmit establishes its boundary.
         turn = payload.get('turn_id') if engine == 'codex' else None
         if engine == 'codex' and (not isinstance(turn, str) or not turn):
-            return (context(event, START) if event == 'UserPromptSubmit' else {}), None
+            return (context(event, START) if event == 'UserPromptSubmit' and not notification else {}), None
         state = json.loads(row[1]) if row else {}
         if (not isinstance(state, dict) or not isinstance(state.get('groups', []), list)
                 or any(not isinstance(group, str) for group in state.get('groups', []))):
             raise ValueError('Invalid stored state')
+        if notification:
+            # A completion message is not a new user request. Claude's next tool
+            # event reuses this row; Codex also remembers the notification turn.
+            if row and engine == 'codex':
+                state['notification_turn'] = turn
+                db.execute('UPDATE sessions SET data=? WHERE id=?', (json.dumps(state), key))
+            return {}, state.get('pr_intent') if state.get('started') is True else None
         if event == 'UserPromptSubmit':
             if engine == 'claude':
                 turn = uuid.uuid4().hex
@@ -1095,6 +1209,8 @@ def session_context(payload, engine, root):
         elif engine == 'claude':
             if not row:
                 return {}, None  # No prompt boundary: don't reuse or invent a task.
+            turn = row[0]
+        elif row and state.get('notification_turn') == turn:
             turn = row[0]
         elif not row or row[0] != turn:
             state = {}
@@ -1123,12 +1239,197 @@ def session_context(payload, engine, root):
     return output, intent
 
 
+UI_DEFAULT_PATHS = ['*.html', '*.css', '*.scss', '*.sass', '*.less', '*.jsx', '*.tsx', '*.vue', '*.svelte',
+                    'web/**', 'frontend/**', 'src/components/**', 'src/pages/**', 'dashboard/public/**']
+
+
+def ui_config(root):
+    path = Path(root) / '.workflow-ui.json'
+    config = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(config, dict):
+        raise ValueError('UI verification configuration must be an object')
+    if config.get('version', 1) != 1:
+        raise ValueError('Unsupported UI verification configuration version')
+    for key in ('paths', 'inputs'):
+        values = config.get(key, UI_DEFAULT_PATHS if key == 'paths' else [])
+        if (not isinstance(values, list) or not all(isinstance(v, str) and v and not Path(v).is_absolute()
+                and '..' not in Path(v).parts for v in values)):
+            raise ValueError('UI verification paths must stay inside the installed workspace')
+        config[key] = values
+    return config
+
+
+def ui_matches(path, patterns):
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def ui_files(root, config):
+    result = subprocess.run(['git', '-C', str(root), 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+                            check=True, capture_output=True, timeout=2)
+    patterns = config['paths'] + config['inputs'] + ['.workflow-ui.json']
+    return sorted({p for p in result.stdout.decode('utf-8', errors='strict').split('\0') if p and ui_matches(p, patterns)})
+
+
+def ui_fingerprint(root, config):
+    records = []
+    for name in ui_files(root, config):
+        path = Path(root) / name
+        if path.is_symlink() or not path.resolve().is_relative_to(Path(root).resolve()):
+            raise ValueError('UI verification inputs must not point outside the workspace')
+        records.append([name, hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None])
+    return digest(json.dumps(records, ensure_ascii=False, separators=(',', ':')))
+
+
+def ui_changed(root, config, release=False):
+    revision = 'HEAD'
+    if release:
+        revision = config.get('base')
+        if revision is None:
+            for candidate in ('origin/HEAD', 'origin/develop', 'origin/main', 'develop', 'main', 'master', 'HEAD'):
+                probe = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify', candidate + '^{commit}'], capture_output=True, timeout=2)
+                if not probe.returncode:
+                    revision = candidate
+                    break
+    if not isinstance(revision, str) or revision.startswith('-'):
+        raise ValueError('UI base revision must be a literal Git revision')
+    changed = subprocess.run(['git', '-C', str(root), 'diff', '--name-only', '-z', revision, '--'],
+                             check=True, capture_output=True, timeout=2)
+    untracked = subprocess.run(['git', '-C', str(root), 'ls-files', '--others', '--exclude-standard', '-z'],
+                               check=True, capture_output=True, timeout=2)
+    return any(ui_matches(p, config['paths']) for p in (changed.stdout + untracked.stdout).decode().split('\0') if p)
+
+
+def ui_report_evidence(root, report):
+    data = json.loads(report.read_text())
+    if not isinstance(data, dict):
+        raise ValueError('Playwright report must be an object')
+    if data.get('framework') != 'playwright' or data.get('passed') is not True:
+        raise ValueError('A passing Playwright report is required')
+    checks = data.get('checks')
+    if not isinstance(checks, list) or not checks or any(not isinstance(c, dict) or c.get('passed') is not True for c in checks):
+        raise ValueError('Playwright assertions must all pass')
+    if not any(c.get('interaction') in {'click', 'keyboard', 'touch'} for c in checks):
+        raise ValueError('Verify an actual interaction; selectOption alone is insufficient')
+    if data.get('consoleErrors') != [] or data.get('networkErrors') != []:
+        raise ValueError('Resolve browser console and network errors before recording UI verification')
+    shots = data.get('screenshots')
+    if not isinstance(shots, list) or not shots:
+        raise ValueError('Rendered screenshot evidence is required')
+    evidence = []
+    for shot in shots:
+        if not isinstance(shot, dict) or not isinstance(shot.get('path'), str):
+            raise ValueError('Screenshot evidence requires a file path and viewport')
+        path = (report.parent / shot['path']).resolve()
+        viewport = shot.get('viewport', {})
+        if (not path.is_relative_to(Path(root).resolve()) or not isinstance(viewport, dict)
+                or not all(type(viewport.get(k)) is int and viewport[k] > 0 for k in ('width', 'height'))):
+            raise ValueError('Screenshot must be inside the workspace and identify its viewport')
+        content = path.read_bytes()
+        if len(content) < 100 or not content.startswith(b'\x89PNG\r\n\x1a\n'):
+            raise ValueError('Screenshot must be a nonempty PNG')
+        evidence.append([str(path.relative_to(Path(root).resolve())), hashlib.sha256(content).hexdigest()])
+    return [[str(report.relative_to(Path(root).resolve())), hashlib.sha256(report.read_bytes()).hexdigest()], *evidence]
+
+
+def verify_ui(root):
+    """Run the project's real browser verifier, binding the successful result to its inputs."""
+    root = Path(root).resolve()
+    config = ui_config(root)
+    command = config.get('command')
+    if not isinstance(command, list) or not command or not all(isinstance(p, str) and p for p in command) or not any('{report}' in p for p in command):
+        raise ValueError('Set .workflow-ui.json command to a Playwright verifier argv containing {report}')
+    before = ui_fingerprint(root, config)
+    directory = root / 'ai-input' / 'ui-validation' / uuid.uuid4().hex
+    directory.mkdir(parents=True, mode=0o700)
+    report = directory / 'report.json'
+    result = subprocess.run([p.replace('{report}', str(report)) for p in command], cwd=root, timeout=600)
+    if result.returncode:
+        raise ValueError('Playwright verification failed; no receipt recorded')
+    evidence = ui_report_evidence(root, report)
+    if ui_fingerprint(root, config) != before:
+        raise ValueError('UI inputs changed during verification; run it again')
+    receipt = {'version': 1, 'fingerprint': before, 'created': time.time(), 'evidence': evidence}
+    target = root / '.workflow-hooks' / 'ui-receipt.json'
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = target.with_suffix('.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with temporary.open('x') as stream:
+            temporary.chmod(0o600)
+            json.dump(receipt, stream)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {'verified': True, 'report': str(report.relative_to(root)), 'fingerprint': before}
+
+
+def ui_session_changed(root, payload, engine, remember=False):
+    """Compare UI content, not Git dirtiness: committing cannot erase the current turn's edits."""
+    session = payload.get('session_id')
+    if not session:
+        return False
+    try:
+        config = ui_config(root)
+        config['inputs'] = []
+        if not any(ui_matches(p, config['paths']) for p in ui_files(root, config)):
+            return False
+        current = ui_fingerprint(root, config)
+        with closing(sqlite3.connect(safe_state_path(root), timeout=0.2)) as db, db:
+            db.execute('CREATE TABLE IF NOT EXISTS ui_sessions (id TEXT PRIMARY KEY, fingerprint TEXT, updated REAL)')
+            key = digest(engine + ':' + session)
+            if remember:
+                db.execute('DELETE FROM ui_sessions WHERE updated < ?', (time.time() - 14 * 86400,))
+                db.execute('INSERT OR REPLACE INTO ui_sessions VALUES (?,?,?)', (key, current, time.time()))
+                return False
+            previous = db.execute('SELECT fingerprint FROM ui_sessions WHERE id=?', (key,)).fetchone()
+            return bool(previous and previous[0] != current)
+    except (OSError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError):
+        return False
+
+
+def ui_gate(root, event, release=False, force=False):
+    try:
+        # 설치 가능한 일반 폴더의 advisory 동작도 보존한다. Git 없는 UI 프로젝트는 명시 설정으로 켠다.
+        if not (Path(root) / '.workflow-ui.json').exists():
+            probe = subprocess.run(['git', '-C', str(root), 'rev-parse', '--is-inside-work-tree'], capture_output=True, timeout=2)
+            if probe.returncode:
+                return None
+        config = ui_config(root)
+        if not force and not ui_changed(root, config, release):
+            return None
+        receipt = json.loads((Path(root) / '.workflow-hooks' / 'ui-receipt.json').read_text())
+        age = time.time() - receipt['created']
+        if not 0 <= age <= REVIEW_MAX_AGE or receipt['fingerprint'] != ui_fingerprint(root, config):
+            raise ValueError('UI verification is stale')
+        for name, expected in receipt['evidence']:
+            path = (Path(root) / name).resolve()
+            if not path.is_relative_to(Path(root).resolve()) or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                raise ValueError('UI evidence changed')
+        if not receipt['evidence']:
+            raise ValueError('UI evidence is missing')
+        return None
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        command = shlex.join([sys.executable, str(Path(root) / '.workflow-hooks' / 'communication.py'), '--root', str(root), '--verify-ui'])
+        message = ('UI 변경의 현재 소스에 연결된 Playwright 검증이 없습니다. 실제 화면·주요 조작·스크린샷·콘솔/네트워크를 검사한 뒤 '
+                   + command + ' 를 실행하세요. .workflow-ui.json에 검증 명령을 설정합니다. 검증 불가 시 완료로 보고하지 말고 '
+                   'UI_VALIDATION_BLOCKED: <미실행 원인·재개 조건>으로 미완료를 알리세요. PR은 검증 전 진행할 수 없습니다.')
+        return {'decision': 'block', 'reason': message} if event == 'Stop' else deny(message)
+
+
 def handle(payload, engine, root):
     if not isinstance(payload, dict):
         return {}
     event = payload.get('hook_event_name')
     if event not in {'UserPromptSubmit', 'PreToolUse', 'Stop'}:
         return {}
+    if outside_installation(payload, root):
+        return {}
+    if event == 'UserPromptSubmit' and not task_notification(payload):
+        ui_session_changed(root, payload, engine, remember=True)
+    if event == 'Stop' and not payload.get('background_tasks') and not payload.get('session_crons'):
+        if not str(payload.get('last_assistant_message', '')).lstrip().startswith('UI_VALIDATION_BLOCKED:'):
+            blocked = ui_gate(root, event, force=ui_session_changed(root, payload, engine))
+            if blocked:
+                return blocked
     boundary = None
     command_cwd = payload.get('cwd', root)
     if event == 'PreToolUse' and payload.get('tool_name') in {'Bash', 'exec_command'}:
@@ -1143,6 +1444,10 @@ def handle(payload, engine, root):
     if boundary and boundary['action'] == 'parse-error':
         return deny(boundary['error'] + '. Use a standalone direct command with literal '
                     'arguments or --body-file; a new review receipt cannot repair shell syntax.')
+    if boundary and boundary['action'] in {'create', 'merge', 'push'} and not boundary.get('delete'):
+        blocked = ui_gate(root, event, release=True)
+        if blocked:
+            return blocked
     if boundary and boundary.get('delete'):
         blocked = check_cleanup(root, command_cwd, boundary)
         if blocked:
@@ -1158,6 +1463,11 @@ def handle(payload, engine, root):
         if not ordinary_push:
             raise  # Advisory errors remain fail open in main().
         output, intent = {}, None
+    if ordinary_push and scoped_path(root, payload.get('cwd')) is False:
+        # External prompts are deliberately not persisted. An internal override
+        # cannot reuse an older in-scope non-PR turn, especially on Claude where
+        # tool events do not carry a stable user-turn identifier.
+        intent = None
     # Missing or unreadable prompt state cannot establish that review is unnecessary.
     if ordinary_push and intent is not False:
         blocked = check_review(root, command_cwd, boundary)
@@ -1174,6 +1484,7 @@ def main():
     record = parser.add_mutually_exclusive_group()
     record.add_argument('--record-pr-review', action='store_true')
     record.add_argument('--record-pr-cleanup', action='store_true')
+    record.add_argument('--verify-ui', action='store_true')
     parser.add_argument('--pr')
     parser.add_argument('--remote')
     parser.add_argument('--repo', type=Path)
@@ -1185,6 +1496,13 @@ def main():
     parser.add_argument('--minor', type=int, default=0)
     parser.add_argument('--blocker', type=int, default=0)
     args = parser.parse_args()
+    if args.verify_ui:
+        try:
+            print(json.dumps(verify_ui(args.root), ensure_ascii=False))
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            print('UI verification not recorded: ' + str(exc), file=sys.stderr)
+            return 2
     if args.record_pr_cleanup:
         try:
             if args.repo is None or args.pr is None or args.remote is None:

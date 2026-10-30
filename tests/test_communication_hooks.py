@@ -467,7 +467,9 @@ class InstallationTests(unittest.TestCase):
     def test_modified_managed_hook_blocks_all_writes(self):
         INSTALL.install(self.root, 'write')
         path = self.root / '.claude/settings.local.json'
-        path.write_text(path.read_text().replace('"timeout": 3', '"timeout": 5'))
+        changed = json.loads(path.read_text())
+        changed['hooks']['Stop'][0]['hooks'][0]['timeout'] += 1
+        path.write_text(json.dumps(changed))
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         with self.assertRaisesRegex(ValueError, 'Modified managed hook'):
             INSTALL.install(self.root, 'write')
