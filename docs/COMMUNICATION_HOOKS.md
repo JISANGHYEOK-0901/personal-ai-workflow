@@ -57,7 +57,7 @@ python3 .workflow-hooks/communication.py \
 - `gh pr create --base <브랜치>`는 검토한 base의 **브랜치 이름**과 대조한다. `origin/develop`을 검토했다면 `--base develop`을 쓰며, 로컬 develop이 뒤처졌다는 이유로 거부하지 않는다. freshness는 검토한 ref의 SHA로 확인한다.
 - `--head <현재 브랜치>`를 반드시 명시한다. 생략하면 gh가 추적 설정에 따라 다른 브랜치·fork를 선택할 수 있으므로 거부한다. 다른 브랜치는 그 checkout에서 다시 검토한다. 생성 전에 push를 끝내고, `gh repo view`가 선택한 저장소와 `git ls-remote`로 읽은 실제 원격 head SHA를 증표와 대조한다. 대상 조회 실패·미push·원격 head 불일치 시 생성하지 않는다.
 - 일반 push는 설정된 remote 이름과 단일 refspec을 명시한다. 예: `git push -u origin HEAD:refs/heads/feature`. source SHA가 검토 HEAD와 같고 목적지는 현재 작업 브랜치여야 하며 원격 대상이 증표와 일치해야 한다. 암시적 push·다중 ref·`--all`·`--tags` 등은 이 게이트의 지원 경로가 아니다.
-- `gh --repo/-R`의 분리형·붙임형, `GH_REPO` 등 대상에 영향을 주는 환경 지정, `git -c` 등 실행 환경 변경은 검토한 checkout과 대상을 일치시킬 수 없으면 거부한다. 명령 문자열의 환경 할당을 제거한 뒤 다른 대상으로 검사하지 않는다.
+- `gh --repo/-R`(분리형·붙임형)는 값이 검토한 checkout의 원격 저장소와 같을 때만 허용한다. `OWNER/REPO`는 github.com 기준이며 `HOST/OWNER/REPO`와 URL도 비교한다. 다른 저장소를 가리키면 그 저장소 checkout을 도구 작업 디렉터리로 지정하거나 단독 `cd <checkout> && gh …`로 실행하라고 안내하며 거부한다. `--hostname`, 빈 값·반복 지정, `GH_REPO` 등 대상에 영향을 주는 환경 지정, `git -c` 등 실행 환경 변경은 거부한다. 명령 문자열의 환경 할당을 제거한 뒤 다른 대상으로 검사하지 않는다.
 
 `gh pr merge`는 숫자 PR 번호와 검토한 전체 HEAD SHA를 모두 명시해야 한다.
 

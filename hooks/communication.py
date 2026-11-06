@@ -480,12 +480,12 @@ def push_boundary(words, repo=None):
 def gh_boundary(words, repo=None):
     """Parse documented direct create/merge options without interpreting body text."""
     words = list(words)
-    overridden = False
+    repo_override = None  # gh --repo value, or True when it cannot be matched to a checkout
     help_requested = False
     error = None
 
     def global_option():
-        nonlocal overridden, error, help_requested
+        nonlocal repo_override, error, help_requested
         if not words:
             return False
         word = words[0]
@@ -499,13 +499,16 @@ def gh_boundary(words, repo=None):
                 error = 'Invalid help flag value'
             words.pop(0)
             return True
-        if word in {'-R', '--repo', '--hostname'}:
-            overridden = True
-            del words[:2]
-            return True
-        if word.startswith(('--repo=', '--hostname=')) or (word.startswith('-R') and len(word) > 2):
-            overridden = True
-            words.pop(0)
+        if word.startswith('-R') and not word.startswith('--') and len(word) > 2:
+            option, separator, value = '-R', '=', word[2:].removeprefix('=')
+        if option in {'-R', '--repo', '--hostname'}:
+            if separator:
+                words.pop(0)
+            else:
+                value = words[1] if len(words) > 1 else ''
+                del words[:2]
+            # Only one explicit repository value can be compared with the reviewed remote.
+            repo_override = True if option == '--hostname' or not value or repo_override else value
             return True
         return False
 
@@ -568,7 +571,7 @@ def gh_boundary(words, repo=None):
         boundary['pr_number'] = positionals[0]
     elif positionals:
         error = 'Use a single numeric PR number for merge and no positional target for create'
-    boundary.update(remote_repo=overridden, error=error)
+    boundary.update(remote_repo=repo_override or False, error=error)
     return None if help_requested else boundary
 
 
@@ -973,11 +976,39 @@ def review_remote(repo, base_ref):
 def check_command_context(boundary):
     if boundary.get('error'):
         raise ValueError(boundary['error'])
-    if boundary.get('remote_repo'):
-        raise ValueError('Run gh from the reviewed local repository without --repo/-R or hostname overrides')
+    if boundary.get('remote_repo') is True:
+        raise ValueError('gh --hostname or an empty/repeated --repo cannot be matched to the reviewed '
+                         'checkout; run gh from that checkout without them')
     if any(os.environ.get(key) for key in ('GH_REPO', 'GH_HOST', 'GIT_DIR', 'GIT_WORK_TREE',
                                           'GIT_COMMON_DIR', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS')):
         raise ValueError('Clear inherited Git/GitHub repository override variables before this command')
+
+
+class RepoOverrideMismatch(ValueError):
+    """gh --repo names a repository other than the checkout that holds the receipt."""
+
+
+def gh_repo_identity(value):
+    """Normalize gh's [HOST/]OWNER/REPO or URL form; GH_HOST is rejected, so the default host is github.com."""
+    if '://' in value or '@' in value:
+        return repository_identity(value)
+    parts = value.strip('/').split('/')
+    if len(parts) == 2:
+        parts.insert(0, 'github.com')
+    if len(parts) != 3 or not all(parts):
+        raise RepoOverrideMismatch('Unsupported gh --repo value; use OWNER/REPO, HOST/OWNER/REPO or a URL')
+    return repository_identity('https://' + '/'.join(parts))
+
+
+def check_repo_override(repo, boundary, remotes):
+    """Reject a --repo target that none of the given checkout remotes identifies."""
+    override = boundary.get('remote_repo')
+    if isinstance(override, str) and gh_repo_identity(override) not in {
+            remote_identity(repo, remote) for remote in remotes}:
+        raise RepoOverrideMismatch(
+            f'gh --repo/-R target {override} is not the reviewed repository of {repo}. Run the PR command '
+            'from the target repository checkout (set the tool working directory, or a single '
+            '`cd <checkout> && gh ...` call) after recording that checkout\'s review, or drop --repo/-R')
 
 
 def check_push(repo, boundary, head_sha, recorded_identity):
@@ -1106,6 +1137,8 @@ def check_review(root, cwd, boundary):
     try:
         check_command_context(boundary)
         repo = resolve_repo(root, cwd, boundary.get('repo'))
+        # Explain a different --repo target before asking for this checkout's receipt.
+        check_repo_override(repo, boundary, named_remotes(repo))
         if boundary['action'] == 'create' and not boundary.get('base'):
             raise ValueError('gh pr create must include an explicit --base')
         if boundary['action'] == 'create' and not boundary.get('head'):
@@ -1123,6 +1156,7 @@ def check_review(root, cwd, boundary):
             raise ValueError('The review receipt needs to be recorded again with repository identity')
         if digest(remote_identity(repo, remote)) != recorded_identity:
             raise ValueError('Reviewed remote repository changed after review')
+        check_repo_override(repo, boundary, [remote])
         branch, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
         if branch.decode().strip() != head_name:
             raise ValueError('Current branch changed after review')
@@ -1139,7 +1173,9 @@ def check_review(root, cwd, boundary):
         if boundary['action'] == 'create':
             if boundary['head'] != head_name:
                 raise ValueError('PR command head must be the currently reviewed branch')
-            if digest(remote_repository_identity(repo)) != recorded_identity:
+            # A matched --repo fixes gh's target; otherwise check gh's own repository selection.
+            if (not isinstance(boundary.get('remote_repo'), str)
+                    and digest(remote_repository_identity(repo)) != recorded_identity):
                 raise ValueError('GitHub selected repository does not match the reviewed repository')
             if remote_branch_sha(repo, remote, head_name) != head_sha:
                 raise ValueError('Remote PR branch SHA does not match the reviewed HEAD; push it first')
@@ -1148,6 +1184,8 @@ def check_review(root, cwd, boundary):
         if boundary['action'] == 'merge':
             check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
         return None
+    except RepoOverrideMismatch as exc:
+        return deny('PR diff review gate blocked this command: ' + str(exc) + '.')
     except (OSError, TypeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
         try:
             repo = resolve_repo(root, cwd, boundary.get('repo'))

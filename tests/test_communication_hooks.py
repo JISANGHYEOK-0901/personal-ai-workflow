@@ -223,7 +223,7 @@ class CommunicationTests(unittest.TestCase):
                                  tool_input={'command':
                                              'gh pr create --base main --head feature --repo owner/repository'})
         self.assertEqual(remote_repo['hookSpecificOutput']['permissionDecision'], 'deny')
-        self.assertIn('without --repo/-R',
+        self.assertIn('is not the reviewed repository',
                       remote_repo['hookSpecificOutput']['permissionDecisionReason'])
 
         state = (self.root / 'ai-input/hook-state/communication.sqlite3').read_bytes()

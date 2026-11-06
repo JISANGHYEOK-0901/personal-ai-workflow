@@ -329,6 +329,45 @@ class PRGateRegressions(unittest.TestCase):
         with patch.dict(HOOK.os.environ, {'GH_REPO': 'other/target'}):
             self.assert_denied('gh pr create --base develop --head feature')
 
+    def test_repo_flag_matching_the_reviewed_remote_is_allowed(self):
+        merge = 'pr merge 17 --merge --match-head-commit ' + self.head
+        with patch.object(HOOK, 'check_remote_pr', return_value=None) as remote_pr, \
+                patch.object(HOOK, 'remote_repository_identity',
+                             side_effect=AssertionError('matched --repo fixes the target')):
+            for command in ('gh -R audit/sample pr create --base develop --head feature',
+                            'gh pr create --base develop --head feature --repo=Audit/Sample',
+                            'gh -Rgithub.com/audit/sample pr create --base develop --head feature',
+                            'gh pr create --base develop --head feature -R https://github.com/audit/sample.git',
+                            'gh --repo audit/sample ' + merge):
+                with self.subTest(command=command):
+                    self.assert_allowed(command)
+        self.assertTrue(remote_pr.called)
+
+    def test_repo_flag_for_another_repository_explains_where_to_run(self):
+        for command in ('gh -R other/target pr create --base develop --head feature',
+                        'gh -R ghe.example.com/audit/sample pr create --base develop --head feature',
+                        'gh -R audit pr create --base develop --head feature'):
+            with self.subTest(command=command):
+                reason = self.command(command)['hookSpecificOutput']['permissionDecisionReason']
+                self.assertTrue('is not the reviewed repository' in reason
+                                or 'Unsupported gh --repo value' in reason, reason)
+                self.assertNotIn('--record-pr-review', reason)
+        self.git('remote', 'add', 'upstream', 'https://github.com/audit/upstream.git')
+        reason = self.command('gh -R audit/upstream pr create --base develop --head feature')[
+            'hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('is not the reviewed repository', reason)
+        with closing(sqlite3.connect(self.root / 'ai-input/hook-state/communication.sqlite3')) as db, db:
+            db.execute('DELETE FROM reviews')
+        reason = self.command('gh -R other/target pr create --base develop --head feature')[
+            'hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('is not the reviewed repository', reason)
+        self.assertNotIn('--record-pr-review', reason)
+        for command in ('gh --hostname github.com pr create --base develop --head feature',
+                        'gh -R audit/sample -R audit/sample pr create --base develop --head feature',
+                        'gh pr create --base develop --head feature --repo='):
+            with self.subTest(command=command):
+                self.assert_denied(command)
+
     def test_push_remote_must_match_reviewed_remote(self):
         self.git('remote', 'add', 'other', 'https://github.com/other/target.git')
         self.assert_denied('git push other feature')
