@@ -5,6 +5,7 @@
 - `workflow/CORE.md`: 규모·언어와 무관한 공통 작성·검증·권한 기준. AZTKS 작성 기준이 기본 포함된다.
 - `skills/execute/`: 활성 실행 스킬 정본. 사실·MINOR·MAJOR·BLOCKER 분류와 최종 의미적 diff 검토를 포함하며 세 도구 사본은 동기화 스크립트가 관리한다.
 - `skills/pr-lifecycle/`: PR 생성·검토·승인된 머지·작업 브랜치 정리의 활성 정본. execute의 공통 diff 게이트를 사용하고 동시 작업·base/head 전진·검증 무효화·머지 경쟁은 references/concurrency.md로 연결한다.
+- `skills/handoff/`: 인계 문서 작성·갱신 정본. 위치는 WORKLOG_POLICY의 기록 위치 규칙을 따르고 `ai-input/handoff/YYYY-MM/`에 Git 제외로 둔다. 같은 작업은 현재 상태 기준으로 갱신하고 `LATEST.md`로 먼저 읽을 문서를 가리킨다.
 - `PROJECT.md`: 이 저장소 설정. `templates/PROJECT.md`는 다른 프로젝트 도입용 양식.
 - `docs/WORKLOG_POLICY.md`: 기존 작업 단위 기록 정책. ai-input 전체는 로컬 유지.
 - 자동 하위 에이전트·전문 업무 스크립트는 기본 활성화하지 않는다.
