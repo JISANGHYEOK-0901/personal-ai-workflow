@@ -13,6 +13,8 @@ description: Create and review pull requests, merge an authorized PR, and finish
 
 로컬 diff·미추적 파일·worktree를 확인한다. 사용자 파일을 일괄 stage·stash·reset·clean하지 않는다. ai-input 전체는 항상 제외한다. 동일 목표의 열린 PR이 있으면 갱신하고 중복 PR을 만들지 않는다.
 
+PR로 반영할 변경은 독립적으로 완료·검증할 수 있는 작업 단위마다 최신 base에서 새 브랜치로 시작한다. 이미 끝난 다른 작업이나 미커밋 변경 위에 새 기능을 계속 쌓지 않는다. 시작할 때 이전 작업의 변경이 남아 있으면 그 작업을 먼저 PR 단위로 정리하거나, 묶을지 사용자 결정을 받는다. 앞 작업에 의존하는 후속 작업은 앞 PR이 머지된 base에서 시작하거나 의존 PR임을 본문에 밝힌다. 사용자가 작업 단위 머지를 기본으로 정한 환경에서는 한 단위의 PR·머지·정리를 끝낸 뒤 다음 단위를 시작한다.
+
 작업 시작과 검증·push·머지 직전에 base SHA와 head SHA를 확인해 검토 기준으로 남긴다. 동시 세션·worktree, base/head 전진, 공유 branch 또는 PR 스택이 있으면 [동시 작업과 base 전진](references/concurrency.md)을 읽고 적용한다. 변경 경로 비겹침이나 mergeability만으로 기존 검증을 승계하지 않는다.
 
 ## 2. 변경 검토와 PR 생성
