@@ -559,72 +559,23 @@ class CommunicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'completed independent Claude session'):
             HOOK.parse_independent_review(events, None, report['base_sha'], report['head_sha'], 'claude')
 
-    def test_non_pr_push_checks_any_independent_review_for_its_source_sha(self):
-        repo = self.feature_repo()
+    def test_ordinary_push_uses_pr_intent_while_merge_requires_independent_proof(self):
+        repo = self.independent_policy_repo()
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
         session = '22294f5c-ad95-43a4-97a1-dc5e265043d8'
         report = {'verdict': 'blocked', 'findings': []}
         with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
             with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
                 HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
-        self.git(repo, 'remote', 'add', 'local', str(self.root / 'other'))
-        self.event('UserPromptSubmit', cwd=str(repo), prompt='plain push')
-        for remote, source, allowed in (('origin', 'HEAD', False), ('origin', 'main', True),
-                                        ('local', 'HEAD', True)):
-            result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
-                'command': f'git push {remote} {source}:refs/heads/feature'})
-            self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision') != 'deny',
-                             allowed, result)
-
-    def test_no_argument_push_uses_the_current_branch_and_configured_remote(self):
-        repo = self.feature_repo()
-        self.git(repo, 'config', 'branch.feature.remote', 'origin')
-        self.git(repo, 'config', 'branch.feature.merge', 'refs/heads/feature')
-        self.git(repo, 'remote', 'add', 'local', str(self.root / 'other'))
-        session = 'd6f34147-590d-4128-8885-83fa8bb73b83'
-        report = {'verdict': 'blocked', 'findings': []}
-        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
-            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
-                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
 
         self.event('UserPromptSubmit', cwd=str(repo), prompt='plain push')
-
-        def blocked(command='git push'):
+        for command in ('git push', 'git push origin HEAD:refs/heads/feature'):
             result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
                                 tool_input={'command': command})
-            return result.get('hookSpecificOutput', {}).get('permissionDecision') == 'deny'
-
-        self.assertTrue(blocked())
-        self.assertTrue(blocked('git push origin'))
-        self.git(repo, 'config', 'remote.origin.push', 'refs/heads/main:refs/heads/main')
-        self.assertFalse(blocked('git push origin'))
-        self.git(repo, 'config', '--unset', 'remote.origin.push')
-        self.git(repo, 'config', 'branch.feature.pushRemote', 'local')
-        self.assertFalse(blocked())
-        self.git(repo, 'switch', 'main')
-        self.git(repo, 'config', 'branch.main.remote', 'origin')
-        self.git(repo, 'config', 'branch.main.merge', 'refs/heads/main')
-        self.assertFalse(blocked())
-
-    def test_non_pr_push_accepts_new_review_after_base_advances(self):
-        repo = self.feature_repo()
-        older_session = '455e0c5b-e8ca-4d75-8101-5d0f13bd13e0'
-        report = {'verdict': 'blocked', 'findings': []}
-        with patch.object(HOOK, 'run_independent_review', return_value=(older_session, '{}', report)):
-            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
-                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
-
-        self.git(repo, 'switch', 'main')
-        self.git(repo, 'commit', '--allow-empty', '-qm', 'advance the base')
-        self.git(repo, 'switch', 'feature')
-        newer_session = 'd62ec1d6-b537-4bd0-8a68-9a0e131affad'
-        with patch.object(HOOK, 'run_independent_review',
-                          return_value=(newer_session, '{}', {'verdict': 'pass', 'findings': []})):
-            HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
-
-        self.event('UserPromptSubmit', cwd=str(repo), prompt='plain push')
-        result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
-            'command': 'git push origin HEAD:refs/heads/feature'})
-        self.assertNotEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny', result)
+            self.assertNotEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        merge = self.merge_with_review(repo, receipt)
+        self.assertEqual(merge['permissionDecision'], 'deny')
+        self.assertIn('has not produced a passing report', merge['permissionDecisionReason'])
 
     def test_replacement_ref_cannot_hide_the_original_base_review_policy(self):
         repo = self.independent_policy_repo()
