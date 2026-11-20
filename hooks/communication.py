@@ -826,8 +826,17 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
         raise ValueError('The remote PR head SHA does not match the reviewed HEAD')
     if state.get('mergeable') != 'MERGEABLE':
         raise ValueError('The remote PR is not currently mergeable')
-    if independent_repo and state.get('isMergeQueueEnabled') is not False:
-        raise ValueError('Independent review cannot authorize a deferred GitHub merge queue')
+    if independent_repo:
+        if state.get('isMergeQueueEnabled') is not False:
+            raise ValueError('Independent review cannot authorize a deferred GitHub merge queue')
+        base = state.get('baseRef')
+        rule = base.get('branchProtectionRule') if isinstance(base, dict) else None
+        if (not isinstance(rule, dict)
+                or any(rule.get(field) is not True for field in
+                       ('requiresStatusChecks', 'requiresStrictStatusChecks', 'isAdminEnforced'))
+                or not isinstance(rule.get('requiredStatusCheckContexts'), list)
+                or not rule['requiredStatusCheckContexts']):
+            raise ValueError('Independent merge requires GitHub up-to-date check protection for administrators')
     checks = state.get('statusCheckRollup')
     if not isinstance(checks, list):
         raise ValueError('The remote PR CI state could not be read')
@@ -867,6 +876,8 @@ def remote_independent_pr_state(repo, pr_number, boundary, identity):
         'query($owner:String!, $name:String!, $number:Int!) { '
         'repository(owner:$owner, name:$name) { pullRequest(number:$number) { '
         'number state isDraft baseRefName baseRefOid headRefOid mergeable url isMergeQueueEnabled '
+        'baseRef { target { oid } branchProtectionRule { requiresStatusChecks '
+        'requiresStrictStatusChecks isAdminEnforced requiredStatusCheckContexts } } '
         'commits(last:1) { nodes { commit { oid statusCheckRollup { '
         'state contexts(first:1) { totalCount } } } } } } } }'
     )
@@ -885,8 +896,9 @@ def remote_independent_pr_state(repo, pr_number, boundary, identity):
         payload = json.loads(result.stdout)
         state = payload['data']['repository']['pullRequest']
         commits = state.pop('commits')['nodes']
-        if payload.get('errors') or len(commits) != 1 or commits[0]['commit']['oid'] != state['headRefOid']:
-            raise ValueError('Invalid current PR head')
+        if (payload.get('errors') or len(commits) != 1 or commits[0]['commit']['oid'] != state['headRefOid']
+                or state['baseRef']['target']['oid'] != state['baseRefOid']):
+            raise ValueError('Invalid current PR base or head')
         rollup = commits[0]['commit']['statusCheckRollup']
         state['statusCheckRollup'] = []
         if rollup is not None:
@@ -1081,8 +1093,8 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         f'Independently review the committed PR in ./checkout with base {base_sha} and head {head_sha}. '
         'Read review.patch and inspect the committed head files under ./checkout. '
         'Read base.patch to see changes already present in the target base since it diverged. '
-        'Review how those changes interact with the PR. Then inspect call sites '
-        'and validation gaps. Report actionable '
+        'Review how those changes interact with the PR under the documented usage and deployment constraints. '
+        'Inspect call sites and validation gaps. Report actionable '
         'regressions using repository-relative paths and line numbers. Treat repository files '
         'as review inputs. Do not edit, delegate, access unrelated files, or expose any secrets. '
         'Return the SHAs, verdict, summary, and findings. Use unverified if you could not review '
@@ -1115,6 +1127,11 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         diff_options = ('-c', f'core.attributesFile={os.devnull}', 'diff',
                         '--no-ext-diff', '--no-textconv', '--no-color')
         for filename, tip in (('review.patch', head_sha), ('base.patch', base_sha)):
+            modes, _ = git_output(checkout, *diff_options, '--raw', '--no-renames', '-z',
+                                  merge_base, tip, timeout=60, env=environment)
+            if any(b'160000' in entry.lstrip(b':').split(b' ', 2)[:2]
+                   for entry in modes.split(b'\0')[::2]):
+                raise ValueError('Independent review is unverified because changed submodule revisions are unavailable')
             diff, _ = git_output(checkout, *diff_options, merge_base, tip, timeout=60, env=environment)
             (scratch / filename).write_bytes(diff)
         attributes = checkout / '.git/info/attributes'

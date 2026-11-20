@@ -312,13 +312,17 @@ class CommunicationTests(unittest.TestCase):
         self.git(repo, 'merge', '--no-edit', 'main')
         return repo
 
-    def merge_with_review(self, repo, receipt, during_lookup=None, queue=False, options=''):
+    def merge_with_review(self, repo, receipt, during_lookup=None, queue=False, options='', protected=True):
         remote = {
             'number': 17, 'state': 'OPEN', 'isDraft': False, 'baseRefName': 'main',
             'baseRefOid': receipt['base'], 'headRefName': 'feature', 'headRefOid': receipt['head'],
             'mergeable': 'MERGEABLE', 'url': 'https://github.com/audit/sample/pull/17',
             'statusCheckRollup': [{'status': 'COMPLETED', 'conclusion': 'SUCCESS'}],
             'isMergeQueueEnabled': queue,
+            'baseRef': {'branchProtectionRule': {
+                'requiresStatusChecks': True, 'requiresStrictStatusChecks': protected,
+                'isAdminEnforced': True, 'requiredStatusCheckContexts': ['integrity'],
+            }},
         }
         def lookup(*args):
             if during_lookup is not None:
@@ -384,7 +388,7 @@ class CommunicationTests(unittest.TestCase):
         evidence.write_text('{}')
         self.assertIn('report has changed', self.merge_with_review(repo, receipt)['permissionDecisionReason'])
 
-    def test_independent_merge_denies_auto_and_required_queue(self):
+    def test_independent_merge_requires_immediate_merge_and_strict_protection(self):
         repo = self.independent_policy_repo()
         session = 'eb15766a-c324-48c1-a3aa-85f2114f7444'
         result = (session, '{}', {'verdict': 'pass', 'findings': []})
@@ -401,6 +405,9 @@ class CommunicationTests(unittest.TestCase):
         advanced = self.merge_with_review(repo, {**receipt, 'base': 'f' * 40})
         self.assertEqual(advanced['permissionDecision'], 'deny')
         self.assertIn('base SHA does not match', advanced['permissionDecisionReason'])
+        unprotected = self.merge_with_review(repo, receipt, protected=False)
+        self.assertEqual(unprotected['permissionDecision'], 'deny')
+        self.assertIn('up-to-date check protection', unprotected['permissionDecisionReason'])
 
     def test_new_blocking_independent_review_revokes_previous_proof(self):
         repo = self.independent_policy_repo()
@@ -614,6 +621,17 @@ class CommunicationTests(unittest.TestCase):
         with patch.object(HOOK.subprocess, 'run', side_effect=observe_patches):
             with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
                 HOOK.run_independent_review(repo, base, head)
+
+    def test_independent_review_marks_changed_submodule_revisions_unverified(self):
+        repo = self.feature_repo()
+        base = self.git(repo, 'rev-parse', 'main')
+        existing = self.git(repo, 'rev-parse', 'HEAD')
+        self.git(repo, 'update-index', '--add', '--cacheinfo', f'160000,{existing},module')
+        self.git(repo, 'commit', '-qm', 'add a submodule revision')
+        head = self.git(repo, 'rev-parse', 'HEAD')
+
+        with self.assertRaisesRegex(ValueError, 'unverified because changed submodule revisions'):
+            HOOK.run_independent_review(repo, base, head)
 
     def test_independent_reviewer_subprocess_keeps_selected_api_auth(self):
         repo = self.feature_repo()
