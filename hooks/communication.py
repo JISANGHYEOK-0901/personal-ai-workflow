@@ -1604,6 +1604,7 @@ def merge_recovery_requires_review(root, repo, boundary, state=None):
 
 
 def check_review(root, cwd, boundary, reviewer=None):
+    review_verified = False
     requires_independent_review = None
     merge_lookup_allowed = False
     deadline = PR_REVIEW_DEADLINE.set(time.monotonic() + PR_REVIEW_TIMEOUT)
@@ -1645,9 +1646,10 @@ def check_review(root, cwd, boundary, reviewer=None):
                                        (boundary['action'] == 'merge' and independent_review_required(repo, base_sha)))
         if requires_independent_review:
             if boundary['action'] == 'merge' and boundary.get('auto'):
-                raise ValueError('Independent review requires an immediate merge; remove --auto')
+                return deny('Use an immediate merge and remove --auto when an independent review is required.')
             verify_independent_review(root, review_proof, independent_updated,
                                       base_sha, head_sha, recorded_identity)
+            review_verified = True
         if boundary['action'] == 'create':
             if boundary['head'] != head_name:
                 raise ValueError('PR command head must be the currently reviewed branch')
@@ -1663,19 +1665,24 @@ def check_review(root, cwd, boundary, reviewer=None):
             check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity,
                             independent_repo=identity if requires_independent_review else None)
         if load_review_receipt(root, repo) != row:
-            raise ValueError('Review receipt changed during the PR boundary check')
+            return deny('Review receipt changed during the PR boundary check. Retry with current evidence.')
         if requires_independent_review:
+            review_verified = False
             verify_independent_review(root, review_proof, independent_updated,
                                       base_sha, head_sha, recorded_identity)
+            review_verified = True
         review_timeout(PR_REVIEW_TIMEOUT)
         return None
     except RepoOverrideMismatch as exc:
         return deny('PR diff review gate blocked this command: ' + str(exc) + '.')
     except (OSError, TypeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
+        reason = str(exc) or 'PR review state could not be verified'
+        if review_verified and not isinstance(exc, PRBaseChanged):
+            return deny('PR diff review gate blocked this command: ' + reason + '.')
         try:
             repo = resolve_repo(root, cwd, boundary.get('repo'))
             command = review_record_command(root, repo)
-            if not requires_independent_review and isinstance(exc, PRBaseChanged):
+            if isinstance(exc, PRBaseChanged):
                 requires_independent_review = merge_recovery_requires_review(root, repo, boundary, exc.state)
             elif requires_independent_review is None and merge_lookup_allowed:
                 requires_independent_review = merge_recovery_requires_review(root, repo, boundary)
@@ -1685,7 +1692,6 @@ def check_review(root, cwd, boundary, reviewer=None):
             command += ' --independent-review'
             if reviewer in ('claude', 'codex'):
                 command += f' --reviewer {reviewer}'
-        reason = str(exc) or 'PR review state could not be verified'
         return deny(
             'PR diff review gate blocked this command: ' + reason + '. Fetch the actual base, read '
             'skills/pr-lifecycle/SKILL.md and skills/execute/references/decision-diff-review.md, '

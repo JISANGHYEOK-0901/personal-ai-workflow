@@ -446,6 +446,54 @@ class CommunicationTests(unittest.TestCase):
         self.assertEqual(unprotected['permissionDecision'], 'deny')
         self.assertIn('classic GitHub branch protection', unprotected['permissionDecisionReason'])
 
+    def test_independent_merge_reads_native_github_shape_and_reuses_verified_proof(self):
+        repo = self.independent_policy_repo()
+        review = ('a828bab0-b356-4b86-9a7c-c29755696784', '{}', {'verdict': 'pass', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=review):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        original_run = subprocess.run
+        cases = (
+            (False, 1, 'SUCCESS', None),
+            (True, 1, 'SUCCESS', 'deferred GitHub merge queue'),
+            (False, 0, 'SUCCESS', 'no reported CI checks'),
+            (False, 1, 'PENDING', 'incomplete or unsuccessful CI'),
+        )
+        for queue, check_count, status, denied in cases:
+            with self.subTest(queue=queue, count=check_count, status=status):
+                calls = []
+                head = receipt['head']
+                protection = {'requiresStatusChecks': True, 'requiresStrictStatusChecks': True,
+                              'isAdminEnforced': True, 'requiredStatusCheckContexts': ['integrity']}
+                pr = {'number': 17, 'state': 'OPEN', 'isDraft': False, 'baseRefName': 'main',
+                      'baseRefOid': receipt['base'], 'headRefOid': head, 'mergeable': 'MERGEABLE',
+                      'url': 'https://github.com/audit/sample/pull/17', 'isMergeQueueEnabled': queue,
+                      'baseRef': {'target': {'oid': receipt['base']}, 'branchProtectionRule': protection},
+                      'commits': {'nodes': [{'commit': {
+                          'oid': head, 'statusCheckRollup': {
+                              'state': status, 'contexts': {'totalCount': check_count}}}}]}}
+                response = json.dumps({'data': {'repository': {'pullRequest': pr}}}).encode()
+
+                def run(args, **kwargs):
+                    if args[0] != 'gh':
+                        return original_run(args, **kwargs)
+                    self.assertEqual(args[:3], ['gh', 'api', 'graphql'])
+                    self.assertIn('isMergeQueueEnabled', ' '.join(args))
+                    self.assertIn('headRefOid', ' '.join(args))
+                    calls.append(args)
+                    return subprocess.CompletedProcess(args, 0, stdout=response, stderr=b'')
+
+                with patch.object(HOOK.subprocess, 'run', side_effect=run):
+                    result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                        'command': 'gh pr merge 17 --merge --match-head-commit ' + head,
+                    }).get('hookSpecificOutput', {})
+                self.assertEqual(len(calls), 1)
+                if denied:
+                    self.assertEqual(result['permissionDecision'], 'deny')
+                    self.assertIn(denied, result['permissionDecisionReason'])
+                    self.assertNotIn('--independent-review', result['permissionDecisionReason'])
+                else:
+                    self.assertNotEqual(result.get('permissionDecision'), 'deny')
+
     def test_new_blocking_independent_review_revokes_previous_proof(self):
         repo = self.independent_policy_repo()
         previous = '34810798-6d2c-481e-973c-c533846f4069'
