@@ -2,6 +2,7 @@
 """Communication reminders, local PR gates, and explicit independent review."""
 import argparse
 from contextlib import closing
+from contextvars import ContextVar
 import fnmatch
 import hashlib
 import json
@@ -700,9 +701,24 @@ def safe_state_path(root):
     return path
 
 
+# Leave room in the installed hook's 20-second timeout for other checks and denial output.
+PR_REVIEW_TIMEOUT = 12
+PR_REVIEW_DEADLINE = ContextVar('pr_review_deadline', default=None)
+
+
+def review_timeout(limit):
+    deadline = PR_REVIEW_DEADLINE.get()
+    if deadline is None:
+        return limit
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError('PR verification deadline reached')
+    return min(limit, remaining)
+
+
 def git_output(repo, *args, allowed=(0,), timeout=5, env=None):
     result = subprocess.run(['git', '-C', str(repo), '--no-replace-objects', *args],
-                            capture_output=True, timeout=timeout, env=env, check=False)
+                            capture_output=True, timeout=review_timeout(timeout), env=env, check=False)
     if result.returncode not in allowed:
         raise ValueError('Git state could not be verified')
     return result.stdout, result.returncode
@@ -714,7 +730,7 @@ def remote_pr_state(repo, pr_number):
     environment = dict(os.environ)
     environment['GH_PROMPT_DISABLED'] = '1'
     result = subprocess.run(['gh', 'pr', 'view', str(pr_number), '--json', fields],
-                            cwd=repo, env=environment, capture_output=True, timeout=8,
+                            cwd=repo, env=environment, capture_output=True, timeout=review_timeout(8),
                             check=False)
     if result.returncode:
         raise ValueError('GitHub PR state could not be verified')
@@ -732,7 +748,7 @@ def remote_repository_identity(repo):
     environment = dict(os.environ)
     environment['GH_PROMPT_DISABLED'] = '1'
     result = subprocess.run(['gh', 'repo', 'view', '--json', 'url'], cwd=repo,
-                            env=environment, capture_output=True, timeout=8, check=False)
+                            env=environment, capture_output=True, timeout=review_timeout(8), check=False)
     if result.returncode:
         raise ValueError('GitHub repository selection could not be verified')
     try:
@@ -786,13 +802,16 @@ class PRBaseChanged(ValueError):
         self.state = state
 
 
-def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity):
+def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity, independent_repo=None):
     pr_number = boundary.get('pr_number')
     if not isinstance(pr_number, str) or not pr_number.isdigit():
         raise ValueError('gh pr merge requires an explicit numeric PR number')
     if boundary.get('match_head') != head_sha:
         raise ValueError('gh pr merge --match-head-commit must equal the reviewed HEAD')
-    state = remote_pr_state(repo, pr_number)
+    if independent_repo:
+        state = remote_independent_pr_state(repo, pr_number, boundary, independent_repo)
+    else:
+        state = remote_pr_state(repo, pr_number)
     if state.get('number') != int(pr_number):
         raise ValueError('GitHub returned a different PR number')
     if digest(pr_repository_identity(state, pr_number)) != recorded_identity:
@@ -807,6 +826,8 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
         raise ValueError('The remote PR head SHA does not match the reviewed HEAD')
     if state.get('mergeable') != 'MERGEABLE':
         raise ValueError('The remote PR is not currently mergeable')
+    if independent_repo and state.get('isMergeQueueEnabled') is not False:
+        raise ValueError('Independent review cannot authorize a deferred GitHub merge queue')
     checks = state.get('statusCheckRollup')
     if not isinstance(checks, list):
         raise ValueError('The remote PR CI state could not be read')
@@ -828,26 +849,55 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
     return state
 
 
-def remote_merge_queue(repo, state):
-    host, owner, name = pr_repository_identity(state, state['number']).split('/')
-    query = ('query($owner:String!, $name:String!, $branch:String!) { '
-             'repository(owner:$owner, name:$name) { mergeQueue(branch:$branch) { id } } }')
-    environment = dict(os.environ, GH_PROMPT_DISABLED='1')
-    result = subprocess.run(
-        ['gh', 'api', 'graphql', '--hostname', host, '-f', 'query=' + query,
-         '-f', 'owner=' + owner, '-f', 'name=' + name, '-f', 'branch=' + state['baseRefName']],
-        cwd=repo, env=environment, capture_output=True, timeout=8, check=False,
+def remote_independent_pr_state(repo, pr_number, boundary, identity):
+    host, owner, name = identity.split('/')
+    if boundary.get('remote_repo'):
+        targets = ['-f', 'owner=' + owner, '-f', 'name=' + name]
+    else:
+        # gh's placeholders select its default repository for numeric PRs. Pin the host
+        # only when all configured repository remotes agree with the reviewed host.
+        for remote in named_remotes(repo):
+            urls, _ = git_output(repo, 'remote', 'get-url', '--all', remote)
+            for url in urls.decode().splitlines():
+                target = repository_identity(url)
+                if not target.startswith('file:') and target.partition('/')[0] != host:
+                    raise ValueError('Use --repo HOST/OWNER/REPO for independent reviews with multiple Git hosts')
+        targets = ['-F', 'owner={owner}', '-F', 'name={repo}']
+    query = (
+        'query($owner:String!, $name:String!, $number:Int!) { '
+        'repository(owner:$owner, name:$name) { pullRequest(number:$number) { '
+        'number state isDraft baseRefName baseRefOid headRefOid mergeable url isMergeQueueEnabled '
+        'commits(last:1) { nodes { commit { oid statusCheckRollup { '
+        'state contexts(first:1) { totalCount } } } } } } } }'
     )
+    environment = dict(os.environ, GH_PROMPT_DISABLED='1')
+    try:
+        result = subprocess.run(
+            ['gh', 'api', 'graphql', '--hostname', host, *targets,
+             '-F', 'number=' + pr_number, '-f', 'query=' + query],
+            cwd=repo, env=environment, capture_output=True, timeout=review_timeout(8), check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError('GitHub PR verification timed out') from exc
     if result.returncode:
-        raise ValueError('GitHub merge queue could not be verified')
+        raise ValueError('GitHub PR and merge queue state could not be verified')
     try:
         payload = json.loads(result.stdout)
-        queue = payload['data']['repository']['mergeQueue']
-        if payload.get('errors') or (queue is not None and not isinstance(queue.get('id'), str)):
-            raise ValueError('Invalid queue response')
+        state = payload['data']['repository']['pullRequest']
+        commits = state.pop('commits')['nodes']
+        if payload.get('errors') or len(commits) != 1 or commits[0]['commit']['oid'] != state['headRefOid']:
+            raise ValueError('Invalid current PR head')
+        rollup = commits[0]['commit']['statusCheckRollup']
+        state['statusCheckRollup'] = []
+        if rollup is not None:
+            count = rollup['contexts']['totalCount']
+            if type(count) is not int or count < 0:
+                raise ValueError('Invalid GitHub check count')
+            if count > 0:
+                state['statusCheckRollup'] = [{'state': rollup['state']}]
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
-        raise ValueError('GitHub merge queue returned an invalid response') from exc
-    return queue is not None
+        raise ValueError('GitHub PR and merge queue state returned an invalid response') from exc
+    return state
 
 
 def resolve_repo(root, cwd, hint=None):
@@ -1121,7 +1171,8 @@ def capture_independent_review(root, repo, base_sha, head_sha, identity, reviewe
         'session': session, 'reviewer': reviewer, 'base_sha': base_sha, 'head_sha': head_sha,
         'repository_identity': identity, 'raw_report': raw_report,
     }, ensure_ascii=False, indent=2).encode('utf-8')
-    with path.open('xb') as stream:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'wb') as stream:
         stream.write(encoded)
     if any(finding['priority'] in ('blocker', 'major') for finding in report['findings']):
         raise ValueError(f'Independent review found a MAJOR or BLOCKER. See {path}')
@@ -1447,7 +1498,7 @@ def check_cleanup(root, cwd, boundary):
 
 
 def load_review_receipt(root, repo):
-    with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
+    with closing(sqlite3.connect(safe_state_path(root), timeout=review_timeout(1))) as db, db:
         ensure_review_table(db)
         return db.execute(
             '''SELECT r.base_ref, r.base_sha, r.head_sha, r.merge_base, r.untracked, r.updated,
@@ -1486,6 +1537,7 @@ def merge_recovery_requires_review(repo, boundary, state=None):
 def check_review(root, cwd, boundary, reviewer=None):
     requires_independent_review = None
     merge_lookup_allowed = False
+    deadline = PR_REVIEW_DEADLINE.set(time.monotonic() + PR_REVIEW_TIMEOUT)
     try:
         check_command_context(boundary)
         repo = resolve_repo(root, cwd, boundary.get('repo'))
@@ -1503,7 +1555,8 @@ def check_review(root, cwd, boundary, reviewer=None):
          recorded_identity, head_name, review_proof, independent_updated) = row
         if not remote or not recorded_identity or not head_name:
             raise ValueError('The review receipt needs to be recorded again with repository identity')
-        if digest(remote_identity(repo, remote)) != recorded_identity:
+        identity = remote_identity(repo, remote)
+        if digest(identity) != recorded_identity:
             raise ValueError('Reviewed remote repository changed after review')
         check_repo_override(repo, boundary, [remote])
         branch, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
@@ -1538,14 +1591,14 @@ def check_review(root, cwd, boundary, reviewer=None):
         if boundary['action'] == 'push':
             check_push(repo, boundary, head_sha, recorded_identity)
         if boundary['action'] == 'merge':
-            state = check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
-            if requires_independent_review and remote_merge_queue(repo, state):
-                raise ValueError('Independent review cannot authorize a deferred GitHub merge queue')
+            check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity,
+                            independent_repo=identity if requires_independent_review else None)
         if load_review_receipt(root, repo) != row:
             raise ValueError('Review receipt changed during the PR boundary check')
         if requires_independent_review:
             verify_independent_review(root, review_proof, independent_updated,
                                       base_sha, head_sha, recorded_identity)
+        review_timeout(PR_REVIEW_TIMEOUT)
         return None
     except RepoOverrideMismatch as exc:
         return deny('PR diff review gate blocked this command: ' + str(exc) + '.')
@@ -1571,6 +1624,8 @@ def check_review(root, cwd, boundary, reviewer=None):
             'then record the clean final state. For merge, use an explicit PR number and '
             '--match-head-commit with the reviewed full HEAD SHA after remote CI succeeds. Retry after:\n'
             + command)
+    finally:
+        PR_REVIEW_DEADLINE.reset(deadline)
 
 
 def session_context(payload, engine, root):

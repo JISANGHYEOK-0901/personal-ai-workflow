@@ -318,6 +318,7 @@ class CommunicationTests(unittest.TestCase):
             'baseRefOid': receipt['base'], 'headRefName': 'feature', 'headRefOid': receipt['head'],
             'mergeable': 'MERGEABLE', 'url': 'https://github.com/audit/sample/pull/17',
             'statusCheckRollup': [{'status': 'COMPLETED', 'conclusion': 'SUCCESS'}],
+            'isMergeQueueEnabled': queue,
         }
         def lookup(*args):
             if during_lookup is not None:
@@ -325,7 +326,7 @@ class CommunicationTests(unittest.TestCase):
             return remote
 
         with patch.object(HOOK, 'remote_pr_state', side_effect=lookup), patch.object(
-                HOOK, 'remote_merge_queue', return_value=queue):
+                HOOK, 'remote_independent_pr_state', side_effect=lookup):
             return self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
                 'command': f"gh pr merge 17 --merge --match-head-commit {receipt['head']} {options}",
             }).get('hookSpecificOutput', {})
@@ -370,9 +371,11 @@ class CommunicationTests(unittest.TestCase):
     def test_merge_uses_captured_review_and_rejects_changed_report(self):
         repo = self.independent_policy_repo()
         session = 'f054c0c1-965e-4b46-8394-cb598df7f573'
+        HOOK.safe_state_path(self.root).parent.chmod(0o755)
         with patch.object(HOOK, 'run_independent_review', return_value=(session, '{"raw":"review"}', {'verdict': 'pass', 'findings': []})):
             receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
         evidence = Path(receipt['review_path'])
+        self.assertEqual(evidence.stat().st_mode & 0o077, 0)
         report = json.loads(evidence.read_text())
         self.assertEqual(report['raw_report'], '{"raw":"review"}')
         self.assertEqual(report['head_sha'], receipt['head'])
@@ -395,6 +398,9 @@ class CommunicationTests(unittest.TestCase):
         queue = self.merge_with_review(repo, receipt, queue=True)
         self.assertEqual(queue['permissionDecision'], 'deny')
         self.assertIn('deferred GitHub merge queue', queue['permissionDecisionReason'])
+        advanced = self.merge_with_review(repo, {**receipt, 'base': 'f' * 40})
+        self.assertEqual(advanced['permissionDecision'], 'deny')
+        self.assertIn('base SHA does not match', advanced['permissionDecisionReason'])
 
     def test_new_blocking_independent_review_revokes_previous_proof(self):
         repo = self.independent_policy_repo()
