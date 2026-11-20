@@ -1034,11 +1034,13 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         git_output(checkout, 'init', '--quiet', '--template=', env=environment)
         git_output(checkout, 'fetch', '--quiet', '--depth=1', '--no-tags', '--no-write-fetch-head',
                    str(repo), merge_base, head_sha, timeout=60, env=environment)
+        # Generate the diff before loading the candidate's .gitattributes or index.
+        diff, _ = git_output(checkout, '-c', f'core.attributesFile={os.devnull}', 'diff',
+                             '--no-ext-diff', '--no-textconv', '--no-color',
+                             merge_base, head_sha, timeout=60, env=environment)
         git_output(checkout, '-c', f'core.hooksPath={scratch / "disabled-hooks"}',
                    '-c', f'core.attributesFile={os.devnull}', 'checkout', '--quiet',
                    '--detach', head_sha, timeout=60, env=environment)
-        diff, _ = git_output(checkout, 'diff', '--no-ext-diff', '--no-textconv', '--no-color',
-                             merge_base, head_sha, timeout=60, env=environment)
         shutil.rmtree(checkout / '.git')
         (scratch / 'review.patch').write_bytes(diff)
         for path in checkout.rglob('*'):

@@ -507,6 +507,34 @@ class CommunicationTests(unittest.TestCase):
                 HOOK.run_independent_review(repo, base, head)
         self.assertFalse(marker.exists())
 
+    def test_review_patch_shows_modified_and_deleted_text_with_disabled_diff_attributes(self):
+        repo = self.feature_repo()
+        self.git(repo, 'switch', 'main')
+        (repo / 'deleted.txt').write_text('text removed in the PR\n')
+        self.git(repo, 'add', 'deleted.txt')
+        self.git(repo, 'commit', '-qm', 'add base-only file')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        (repo / '.gitattributes').write_text('*.txt -diff\n')
+        self.git(repo, 'add', '.gitattributes')
+        self.git(repo, 'rm', 'deleted.txt')
+        self.git(repo, 'commit', '-qm', 'remove file and disable text diff')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        self.assertIn('Binary files', self.git(repo, 'diff', base, head))
+        run_git = subprocess.run
+
+        def observe_patch(args, **kwargs):
+            if args[0] == 'codex':
+                diff = (kwargs['cwd'] / 'review.patch').read_text()
+                self.assertIn('-base\n+feature', diff)
+                self.assertIn('-text removed in the PR', diff)
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.object(HOOK.subprocess, 'run', side_effect=observe_patch):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+
     def test_independent_reviewer_subprocess_keeps_selected_api_auth(self):
         repo = self.feature_repo()
         base = self.git(repo, 'rev-parse', 'main')
