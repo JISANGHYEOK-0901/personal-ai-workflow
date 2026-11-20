@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import shutil
 from pathlib import Path
 import sqlite3
@@ -66,10 +67,10 @@ class CommunicationTests(unittest.TestCase):
         return subprocess.run(['git', '-C', str(repo), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def feature_repo(self):
+    def feature_repo(self, object_format='sha1'):
         repo = self.root / 'app'
         repo.mkdir()
-        self.git(repo, 'init', '-q', '-b', 'main')
+        self.git(repo, 'init', '-q', '-b', 'main', '--object-format=' + object_format)
         self.git(repo, 'config', 'user.name', 'Hook Test')
         self.git(repo, 'config', 'user.email', 'hook@example.invalid')
         self.git(repo, 'remote', 'add', 'origin', 'https://github.com/audit/sample.git')
@@ -300,6 +301,683 @@ class CommunicationTests(unittest.TestCase):
             blocked = merge(command)
         self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('unsuccessful CI', blocked['hookSpecificOutput']['permissionDecisionReason'])
+
+    def independent_policy_repo(self):
+        repo = self.feature_repo()
+        self.git(repo, 'switch', 'main')
+        (repo / '.workflow-pr.json').write_text('{"require_independent_review": true}\n')
+        self.git(repo, 'add', '.workflow-pr.json')
+        self.git(repo, 'commit', '-qm', 'require independent review')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        return repo
+
+    def merge_with_review(self, repo, receipt, during_lookup=None, queue=False, options='', protected=True):
+        remote = {
+            'number': 17, 'state': 'OPEN', 'isDraft': False, 'baseRefName': 'main',
+            'baseRefOid': receipt['base'], 'headRefName': 'feature', 'headRefOid': receipt['head'],
+            'mergeable': 'MERGEABLE', 'url': 'https://github.com/audit/sample/pull/17',
+            'statusCheckRollup': [{'status': 'COMPLETED', 'conclusion': 'SUCCESS'}],
+            'isMergeQueueEnabled': queue,
+            'baseRef': {'branchProtectionRule': {
+                'requiresStatusChecks': True, 'requiresStrictStatusChecks': protected,
+                'isAdminEnforced': True, 'requiredStatusCheckContexts': ['integrity'],
+            }},
+        }
+        def lookup(*args):
+            if during_lookup is not None:
+                during_lookup()
+            return remote
+
+        with patch.object(HOOK, 'remote_pr_state', side_effect=lookup), patch.object(
+                HOOK, 'remote_independent_pr_state', side_effect=lookup):
+            return self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                'command': f"gh pr merge 17 --merge --match-head-commit {receipt['head']} {options}",
+            }).get('hookSpecificOutput', {})
+
+    def test_merge_policy_comes_from_base_even_if_head_removes_it(self):
+        repo = self.independent_policy_repo()
+        self.git(repo, 'rm', '.workflow-pr.json')
+        self.git(repo, 'commit', '-qm', 'remove PR policy from head')
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        output = self.merge_with_review(repo, receipt)
+        self.assertEqual(output['permissionDecision'], 'deny')
+        self.assertIn('An independent review is required', output['permissionDecisionReason'])
+        self.assertIn('--independent-review', output['permissionDecisionReason'])
+
+    def test_merge_recovery_uses_the_target_policy_for_missing_and_stale_receipts(self):
+        repo = self.independent_policy_repo()
+        target = {'base': self.git(repo, 'rev-parse', 'main'), 'head': self.git(repo, 'rev-parse', 'HEAD')}
+        missing = self.merge_with_review(repo, target)
+        self.assertIn('No review receipt', missing['permissionDecisionReason'])
+        self.assertIn('--independent-review --reviewer codex', missing['permissionDecisionReason'])
+
+        HOOK.record_review(self.root, repo, 'main', True, True, True)
+        with patch.object(HOOK.time, 'time', return_value=HOOK.time.time() + HOOK.REVIEW_MAX_AGE + 1):
+            stale = self.merge_with_review(repo, target)
+        self.assertIn('older than 24 hours', stale['permissionDecisionReason'])
+        self.assertIn('--independent-review --reviewer codex', stale['permissionDecisionReason'])
+
+    def test_merge_recovery_checks_existing_proof_before_requesting_new_review(self):
+        repo = self.feature_repo()
+        target = {'base': self.git(repo, 'rev-parse', 'main'), 'head': self.git(repo, 'rev-parse', 'HEAD')}
+        failed = ('bfa2a266-3a72-4b44-96a1-887d29b76dc9', '{}', {'verdict': 'blocked', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=failed):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        recovery = self.merge_with_review(repo, target)
+        self.assertIn('--independent-review', recovery['permissionDecisionReason'])
+
+        completed = ('8765807b-c946-4e88-b635-c2eb6728a098', '{}', {'verdict': 'pass', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=completed):
+            HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        with closing(sqlite3.connect(HOOK.safe_state_path(self.root))) as db, db:
+            db.execute('DELETE FROM reviews')
+        with patch.object(HOOK, 'independent_review_required', return_value=True):
+            reusable = self.merge_with_review(repo, target)
+        self.assertIn('No review receipt', reusable['permissionDecisionReason'])
+        self.assertNotIn('--independent-review', reusable['permissionDecisionReason'])
+        with patch.object(HOOK.time, 'time', return_value=HOOK.time.time() + HOOK.REVIEW_MAX_AGE + 1):
+            expired = self.merge_with_review(repo, target)
+        self.assertIn('--independent-review', expired['permissionDecisionReason'])
+
+    def test_merge_recovery_uses_the_explicit_repository(self):
+        repo = self.independent_policy_repo()
+        self.git(repo, 'remote', 'add', 'other', 'https://github.com/audit/second.git')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        pr = {'number': 17, 'baseRefOid': base, 'headRefOid': head,
+              'url': 'https://github.com/audit/second/pull/17'}
+        config = self.root / 'gh-config'
+        config.mkdir()
+        (config / 'hosts.yml').write_text('enterprise.example.invalid:\n  git_protocol: https\n')
+        enterprise = {**pr, 'url': 'https://enterprise.example.invalid/audit/second/pull/17'}
+        with patch.dict(os.environ, {'GH_CONFIG_DIR': str(config)}), patch.object(
+                HOOK, 'remote_pr_state', return_value=enterprise) as lookup:
+            ambiguous = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                'command': f'gh pr merge 17 --repo audit/second --merge --match-head-commit {head}'})
+            self.assertNotIn('--independent-review', ambiguous['hookSpecificOutput']['permissionDecisionReason'])
+            lookup.assert_called_once_with(repo.resolve(), '17', repository='audit/second')
+            lookup.reset_mock()
+            lookup.return_value = pr
+            output = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                'command': f'gh pr merge 17 --repo github.com/audit/second --merge --match-head-commit {head}'})
+        lookup.assert_called_once_with(repo.resolve(), '17', repository='github.com/audit/second')
+        reason = output['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('No review receipt', reason)
+        self.assertIn('--independent-review --reviewer codex', reason)
+
+    def test_merge_recovery_uses_policy_when_remote_base_advances(self):
+        repo = self.feature_repo()
+        self.git(repo, 'update-ref', 'refs/remotes/origin/main', self.git(repo, 'rev-parse', 'main'))
+        receipt = HOOK.record_review(self.root, repo, 'origin/main', True, True, True)
+        self.git(repo, 'switch', 'main')
+        (repo / '.workflow-pr.json').write_text('{"require_independent_review": true}\n')
+        self.git(repo, 'add', '.workflow-pr.json')
+        self.git(repo, 'commit', '-qm', 'enable review in remote base')
+        target = {**receipt, 'base': self.git(repo, 'rev-parse', 'main')}
+        self.git(repo, 'switch', 'feature')
+        recovery = self.merge_with_review(repo, target)
+        self.assertIn('base SHA does not match', recovery['permissionDecisionReason'])
+        self.assertIn('--independent-review --reviewer codex', recovery['permissionDecisionReason'])
+
+    def test_merge_uses_captured_review_and_rejects_changed_report(self):
+        repo = self.independent_policy_repo()
+        session = 'f054c0c1-965e-4b46-8394-cb598df7f573'
+        HOOK.safe_state_path(self.root).parent.chmod(0o755)
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{"raw":"review"}', {'verdict': 'pass', 'findings': []})):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        evidence = Path(receipt['review_path'])
+        self.assertEqual(evidence.stat().st_mode & 0o077, 0)
+        report = json.loads(evidence.read_text())
+        self.assertEqual(report['raw_report'], '{"raw":"review"}')
+        self.assertEqual(report['head_sha'], receipt['head'])
+        self.assertEqual(receipt['review_session'], session)
+        self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+        evidence.write_text('{}')
+        self.assertIn('report has changed', self.merge_with_review(repo, receipt)['permissionDecisionReason'])
+
+    def test_independent_merge_requires_immediate_merge_and_strict_protection(self):
+        repo = self.independent_policy_repo()
+        session = 'eb15766a-c324-48c1-a3aa-85f2114f7444'
+        result = (session, '{}', {'verdict': 'pass', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=result):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+
+        self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+        ambiguous = self.merge_with_review(repo, receipt, options='--repo audit/sample')
+        self.assertEqual(ambiguous['permissionDecision'], 'deny')
+        self.assertIn('HOST/OWNER/REPO', ambiguous['permissionDecisionReason'])
+        auto = self.merge_with_review(repo, receipt, options='--auto')
+        self.assertEqual(auto['permissionDecision'], 'deny')
+        self.assertIn('remove --auto', auto['permissionDecisionReason'])
+        queue = self.merge_with_review(repo, receipt, queue=True)
+        self.assertEqual(queue['permissionDecision'], 'deny')
+        self.assertIn('deferred GitHub merge queue', queue['permissionDecisionReason'])
+        advanced = self.merge_with_review(repo, {**receipt, 'base': 'f' * 40})
+        self.assertEqual(advanced['permissionDecision'], 'deny')
+        self.assertIn('base SHA does not match', advanced['permissionDecisionReason'])
+        unprotected = self.merge_with_review(repo, receipt, protected=False)
+        self.assertEqual(unprotected['permissionDecision'], 'deny')
+        self.assertIn('classic GitHub branch protection', unprotected['permissionDecisionReason'])
+
+    def test_independent_merge_reads_native_github_shape_and_reuses_verified_proof(self):
+        repo = self.independent_policy_repo()
+        review = ('a828bab0-b356-4b86-9a7c-c29755696784', '{}', {'verdict': 'pass', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=review):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        original_run = subprocess.run
+        cases = (
+            (False, 1, 'SUCCESS', None),
+            (True, 1, 'SUCCESS', 'deferred GitHub merge queue'),
+            (False, 0, 'SUCCESS', 'no reported CI checks'),
+            (False, 1, 'PENDING', 'incomplete or unsuccessful CI'),
+        )
+        for queue, check_count, status, denied in cases:
+            with self.subTest(queue=queue, count=check_count, status=status):
+                calls = []
+                head = receipt['head']
+                protection = {'requiresStatusChecks': True, 'requiresStrictStatusChecks': True,
+                              'isAdminEnforced': True, 'requiredStatusCheckContexts': ['integrity']}
+                pr = {'number': 17, 'state': 'OPEN', 'isDraft': False, 'baseRefName': 'main',
+                      'baseRefOid': receipt['base'], 'headRefOid': head, 'mergeable': 'MERGEABLE',
+                      'url': 'https://github.com/audit/sample/pull/17', 'isMergeQueueEnabled': queue,
+                      'baseRef': {'target': {'oid': receipt['base']}, 'branchProtectionRule': protection},
+                      'commits': {'nodes': [{'commit': {
+                          'oid': head, 'statusCheckRollup': {
+                              'state': status, 'contexts': {'totalCount': check_count}}}}]}}
+                response = json.dumps({'data': {'repository': {'pullRequest': pr}}}).encode()
+
+                def run(args, **kwargs):
+                    if args[0] != 'gh':
+                        return original_run(args, **kwargs)
+                    self.assertEqual(args[:3], ['gh', 'api', 'graphql'])
+                    self.assertIn('isMergeQueueEnabled', ' '.join(args))
+                    self.assertIn('headRefOid', ' '.join(args))
+                    calls.append(args)
+                    return subprocess.CompletedProcess(args, 0, stdout=response, stderr=b'')
+
+                with patch.object(HOOK.subprocess, 'run', side_effect=run):
+                    result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                        'command': 'gh pr merge 17 --merge --match-head-commit ' + head,
+                    }).get('hookSpecificOutput', {})
+                self.assertEqual(len(calls), 1)
+                if denied:
+                    self.assertEqual(result['permissionDecision'], 'deny')
+                    self.assertIn(denied, result['permissionDecisionReason'])
+                    self.assertNotIn('--independent-review', result['permissionDecisionReason'])
+                else:
+                    self.assertNotEqual(result.get('permissionDecision'), 'deny')
+
+    def test_new_blocking_independent_review_revokes_previous_proof(self):
+        repo = self.independent_policy_repo()
+        previous = '34810798-6d2c-481e-973c-c533846f4069'
+        with patch.object(HOOK, 'run_independent_review', return_value=(previous, '{"initial":"pass"}', {'verdict': 'pass', 'findings': []})):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        next_session = '4a00fc93-08d7-4905-b0ef-0ba11cc4c2c0'
+        findings = [{'priority': 'major', 'description': 'Behavior regressed.'}]
+        with patch.object(HOOK, 'run_independent_review',
+                          return_value=(next_session, '{"new":"finding"}', {'verdict': 'blocked', 'findings': findings})):
+            with self.assertRaisesRegex(ValueError, 'MAJOR or BLOCKER'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.assertTrue(HOOK.independent_review_path(self.root, next_session).is_file())
+        self.assertEqual(self.merge_with_review(repo, receipt)['permissionDecision'], 'deny')
+
+    def test_late_independent_report_cannot_replace_a_newer_receipt(self):
+        repo = self.independent_policy_repo()
+        session = '8c1aa752-8afb-4f4e-9fd4-d98f5ceb0c0f'
+
+        def run_then_replace(*args):
+            next_session = '42986aee-cf04-4724-80c1-3249b919cb40'
+            review = {'verdict': 'blocked', 'findings': []}
+            with patch.object(HOOK, 'run_independent_review', return_value=(next_session, '{}', review)):
+                with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                    HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+            return session, '{"late":"pass"}', {'verdict': 'pass', 'findings': []}
+
+        with patch.object(HOOK, 'run_independent_review', side_effect=run_then_replace):
+            with self.assertRaisesRegex(ValueError, 'newer independent review'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        receipt = {'base': self.git(repo, 'rev-parse', 'main').strip(),
+                   'head': self.git(repo, 'rev-parse', 'HEAD').strip()}
+        self.assertEqual(self.merge_with_review(repo, receipt)['permissionDecision'], 'deny')
+
+    def test_merge_rejects_a_review_replaced_during_remote_lookup(self):
+        repo = self.independent_policy_repo()
+        session = 'c42681e2-c56c-4140-9e85-7725b54220cd'
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', {'verdict': 'pass', 'findings': []})):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+
+        def replace_receipt():
+            next_session = '9ae0e0a9-321c-42f2-a4d0-117a5d8a79d8'
+            review = {'verdict': 'blocked', 'findings': []}
+            with patch.object(HOOK, 'run_independent_review', return_value=(next_session, '{}', review)):
+                with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                    HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+
+        output = self.merge_with_review(repo, receipt, during_lookup=replace_receipt)
+        self.assertEqual(output.get('permissionDecision'), 'deny')
+        self.assertIn('receipt changed', output['permissionDecisionReason'])
+
+    def test_ordinary_receipt_keeps_a_blocking_review_on_the_same_shas(self):
+        repo = self.feature_repo()
+        session = '1a857186-1f25-4124-9a77-574d853d2901'
+        findings = [{'priority': 'major', 'description': 'Regression found.'}]
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', {'verdict': 'blocked', 'findings': findings})):
+            with self.assertRaisesRegex(ValueError, 'MAJOR or BLOCKER'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        output = self.merge_with_review(repo, receipt)
+        self.assertEqual(output.get('permissionDecision'), 'deny')
+        self.assertIn('has not produced a passing report', output['permissionDecisionReason'])
+
+    def test_unverified_independent_review_rejects_empty_findings(self):
+        repo = self.independent_policy_repo()
+        session = '6b749259-5a22-4586-9e20-6c6e66a7e023'
+        report = {'verdict': 'unverified', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.assertTrue(HOOK.independent_review_path(self.root, session).is_file())
+
+    def test_independent_checkout_exposes_only_the_patch_and_current_files(self):
+        repo = self.feature_repo()
+        removed = repo / 'removed.txt'
+        removed.write_text('A historical-only test blob\n')
+        self.git(repo, 'add', 'removed.txt')
+        self.git(repo, 'commit', '-qm', 'historical file')
+        obsolete_blob = self.git(repo, 'rev-parse', 'HEAD:removed.txt')
+        self.git(repo, 'rm', 'removed.txt')
+        self.git(repo, 'commit', '-qm', 'delete historical file')
+        outside = self.root / 'outside.txt'
+        outside.write_text('Outside the review inputs.\n')
+        (repo / 'link.txt').symlink_to(outside)
+        (repo / '.gitattributes').write_text('app.txt filter=proof-probe\n')
+        self.git(repo, 'add', '.gitattributes', 'link.txt')
+        self.git(repo, 'commit', '-qm', 'declare filter on reviewed paths')
+        base = self.git(repo, 'rev-parse', 'main').strip()
+        head = self.git(repo, 'rev-parse', 'HEAD').strip()
+        config = self.root / 'review-probe.config'
+        hooks = self.root / 'test-hooks'
+        hooks.mkdir()
+        marker = self.root / 'git-program-called'
+        filter_command = self.root / 'probe-filter'
+        filter_command.write_text('#!/bin/sh\nprintf filter >> "$WORKFLOW_TEST_PROBE"\ncat\n')
+        checkout_hook = hooks / 'post-checkout'
+        checkout_hook.write_text('#!/bin/sh\nprintf hook >> "$WORKFLOW_TEST_PROBE"\n')
+        checkout_hook.chmod(0o700)
+        self.git(repo, 'config', '--file', str(config), 'core.hooksPath', str(hooks))
+        self.git(repo, 'config', '--file', str(config), 'filter.proof-probe.smudge',
+                 'sh ' + shlex.quote(str(filter_command)))
+        run_git = subprocess.run
+
+        def stop_at_reviewer(args, **kwargs):
+            if args[0] == 'codex':
+                scratch = kwargs['cwd']
+                checkout = scratch / 'checkout'
+                self.assertFalse((checkout / '.git').exists())
+                self.assertFalse((checkout / 'removed.txt').exists())
+                self.assertFalse((checkout / 'link.txt').is_symlink())
+                self.assertEqual((checkout / 'link.txt').read_text(), str(outside))
+                inaccessible = run_git(['git', 'cat-file', '-e', obsolete_blob], cwd=checkout,
+                                       env=kwargs['env'], capture_output=True)
+                self.assertNotEqual(inaccessible.returncode, 0)
+                self.assertEqual((checkout / 'app.txt').read_text(), 'feature\n')
+                diff = (scratch / 'review.patch').read_text().strip()
+                self.assertEqual(diff, self.git(repo, 'diff', '--no-ext-diff', '--no-textconv',
+                                               '--no-color', base + '...' + head))
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(config),
+                                     'WORKFLOW_TEST_PROBE': str(marker)}), patch.object(
+                                         HOOK.subprocess, 'run', side_effect=stop_at_reviewer):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+        self.assertFalse(marker.exists())
+
+    def test_review_patch_shows_modified_and_deleted_text_with_disabled_diff_attributes(self):
+        repo = self.feature_repo()
+        self.git(repo, 'switch', 'main')
+        (repo / 'deleted.txt').write_text('text removed in the PR\n')
+        self.git(repo, 'add', 'deleted.txt')
+        self.git(repo, 'commit', '-qm', 'add base-only file')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        (repo / '.gitattributes').write_text('*.txt -diff\n')
+        self.git(repo, 'add', '.gitattributes')
+        self.git(repo, 'rm', 'deleted.txt')
+        self.git(repo, 'commit', '-qm', 'remove file and disable text diff')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        self.assertIn('Binary files', self.git(repo, 'diff', base, head))
+        run_git = subprocess.run
+
+        def observe_patch(args, **kwargs):
+            if args[0] == 'codex':
+                diff = (kwargs['cwd'] / 'review.patch').read_text()
+                self.assertIn('-base\n+feature', diff)
+                self.assertIn('-text removed in the PR', diff)
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.object(HOOK.subprocess, 'run', side_effect=observe_patch):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+
+    def test_unchanged_call_site_is_readable_in_committed_encoding(self):
+        repo = self.feature_repo()
+        self.git(repo, 'switch', 'main')
+        original = 'result = lookup("existing")\n'
+        (repo / '.gitattributes').write_text('caller.py working-tree-encoding=UTF-16LE\n')
+        (repo / 'caller.py').write_bytes(original.encode('utf-16le'))
+        self.git(repo, 'add', '.gitattributes', 'caller.py')
+        self.git(repo, 'commit', '-qm', 'record a caller and its checkout encoding')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        run_git = subprocess.run
+
+        def observe_snapshot(args, **kwargs):
+            if args[0] == 'codex':
+                scratch = kwargs['cwd']
+                self.assertNotIn('caller.py', (scratch / 'review.patch').read_text())
+                self.assertEqual((scratch / 'checkout/caller.py').read_bytes(), original.encode('utf-8'))
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.object(HOOK.subprocess, 'run', side_effect=observe_snapshot):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+
+    def test_sha256_review_includes_contract_changes_from_a_diverged_base(self):
+        repo = self.feature_repo(object_format='sha256')
+        self.git(repo, 'switch', 'main')
+        api = repo / 'api.py'
+        api.write_text('def lookup(identifier):\n    return identifier\n')
+        legacy = repo / 'legacy.ps1'
+        previous = 'function Lookup($Identifier) {}\n'.encode('utf-16')
+        advanced = 'function Lookup($Identifier, $Required) {}\n'.encode('utf-16')
+        legacy.write_bytes(previous)
+        self.git(repo, 'add', 'api.py', 'legacy.ps1')
+        self.git(repo, 'commit', '-qm', 'original signature')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        (repo / 'caller.py').write_text('from api import lookup\nresult = lookup("value")\n')
+        self.git(repo, 'add', 'caller.py')
+        self.git(repo, 'commit', '-qm', 'call the original API')
+        self.git(repo, 'switch', 'main')
+        api.write_text('def lookup(identifier, required):\n    return identifier, required\n')
+        legacy.write_bytes(advanced)
+        self.git(repo, 'commit', '-qam', 'advance the base signatures')
+        self.git(repo, 'switch', 'feature')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        self.assertEqual((len(base), len(head)), (64, 64))
+        run_git = subprocess.run
+
+        def observe_patches(args, **kwargs):
+            if args[0] == 'codex':
+                scratch = kwargs['cwd']
+                self.assertIn('+result = lookup("value")', (scratch / 'review.patch').read_text())
+                self.assertIn('+def lookup(identifier, required):', (scratch / 'base.patch').read_text())
+                self.assertIn('def lookup(identifier):', (scratch / 'checkout/api.py').read_text())
+                binary_files = json.loads((scratch / 'binary-files.json').read_text())
+                original = binary_files['base.patch'][0]
+                self.assertEqual(original['path'], 'legacy.ps1')
+                self.assertEqual((scratch / original['before']).read_bytes(), previous)
+                self.assertEqual((scratch / original['after']).read_bytes(), advanced)
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.object(HOOK.subprocess, 'run', side_effect=observe_patches):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+
+    def test_independent_review_marks_changed_submodule_revisions_unverified(self):
+        repo = self.feature_repo()
+        base = self.git(repo, 'rev-parse', 'main')
+        existing = self.git(repo, 'rev-parse', 'HEAD')
+        self.git(repo, 'update-index', '--add', '--cacheinfo', f'160000,{existing},module')
+        self.git(repo, 'commit', '-qm', 'add a submodule revision')
+        head = self.git(repo, 'rev-parse', 'HEAD')
+
+        with self.assertRaisesRegex(ValueError, 'unverified because changed submodule revisions'):
+            HOOK.run_independent_review(repo, base, head)
+
+    def test_review_snapshot_rejects_case_colliding_paths_that_were_not_materialized(self):
+        repo = self.feature_repo()
+        self.git(repo, 'config', 'core.ignorecase', 'false')
+        old_blob = self.git(repo, 'rev-parse', 'main:app.txt')
+        new_blob = self.git(repo, 'rev-parse', 'HEAD:app.txt')
+        self.git(repo, 'update-index', '--add', '--cacheinfo', f'100644,{old_blob},Caller.py')
+        self.git(repo, 'update-index', '--add', '--cacheinfo', f'100644,{new_blob},caller.py')
+        self.git(repo, 'commit', '-qm', 'store both case variants')
+        head = self.git(repo, 'rev-parse', 'HEAD')
+        names = self.git(repo, 'ls-tree', '--name-only', head).splitlines()
+        self.assertIn('Caller.py', names)
+        self.assertIn('caller.py', names)
+        (repo / 'Caller.py').write_text('base\n')
+
+        with self.assertRaisesRegex(ValueError, 'checkout does not reproduce the committed files'):
+            HOOK.verify_review_snapshot(repo.resolve(), head, 'sha1', os.environ)
+
+    def test_independent_reviewer_subprocess_keeps_selected_api_auth(self):
+        repo = self.feature_repo()
+        base = self.git(repo, 'rev-parse', 'main')
+        head = self.git(repo, 'rev-parse', 'HEAD')
+        session = 'c3d22a2c-4066-43b7-bd80-9a7f3643eb5a'
+        report = {'base_sha': base, 'head_sha': head, 'verdict': 'pass',
+                  'summary': 'Checked committed diff.', 'findings': []}
+        binaries = self.root / 'test-bin'
+        binaries.mkdir()
+        source = f"""#!{sys.executable}
+import json
+import os
+from pathlib import Path
+import sys
+args = sys.argv
+report = {report!r}
+session = {session!r}
+if Path(args[0]).name == 'claude':
+    assert os.environ.get('ANTHROPIC_API_KEY') == 'fixture-claude-key'
+    assert os.environ.get('CLAUDE_CODE_USE_BEDROCK') == '1'
+    assert 'CODEX_API_KEY' not in os.environ and 'CLAUDECODE' not in os.environ
+    assert '--restricted' in args and '--safe-mode' in args
+    assert args[args.index('--tools') + 1] == 'Read,Glob,Grep'
+    print(json.dumps(dict(type='system', subtype='init', session_id=session)))
+    print(json.dumps(dict(type='result', subtype='success', is_error=False,
+                          session_id=session, structured_output=report)))
+else:
+    assert os.environ.get('CODEX_API_KEY') == 'fixture-codex-key'
+    assert 'ANTHROPIC_API_KEY' not in os.environ
+    assert args[args.index('--sandbox') + 1] == 'read-only'
+    assert '--ignore-user-config' in args
+    assert 'shell_environment_policy.inherit="none"' in args
+    assert 'openai_base_url="https://codex.fixture.invalid/v1"' in args
+    assert args[args.index('--model') + 1] == 'fixture-model'
+    Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps(report))
+    print(json.dumps(dict(type='thread.started', thread_id=session)))
+    print(json.dumps(dict(type='turn.completed')))
+"""
+        for reviewer in ('claude', 'codex'):
+            executable = binaries / reviewer
+            executable.write_text(source)
+            executable.chmod(0o700)
+        variables = {
+            'PATH': str(binaries) + os.pathsep + os.environ.get('PATH', os.defpath),
+            'CLAUDECODE': '1',
+            'ANTHROPIC_API_KEY': 'fixture-claude-key',
+            'CLAUDE_CODE_USE_BEDROCK': '1',
+            'CODEX_API_KEY': 'fixture-codex-key',
+            'WORKFLOW_CODEX_REVIEW_BASE_URL': 'https://codex.fixture.invalid/v1',
+            'WORKFLOW_CODEX_REVIEW_MODEL': 'fixture-model',
+        }
+        with patch.dict(os.environ, variables):
+            for reviewer in ('claude', 'codex'):
+                with self.subTest(reviewer=reviewer):
+                    identity, _, result = HOOK.run_independent_review(repo, base, head, reviewer)
+                    self.assertEqual(identity, session)
+                    self.assertEqual(result, report)
+
+    def test_refresh_preserves_passing_review_and_its_original_age(self):
+        repo = self.independent_policy_repo()
+        session = 'dc71fc91-10c3-43f4-9cc4-cfc3e0b77c46'
+        report = {'verdict': 'pass', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        original = HOOK.load_review_receipt(self.root, repo.resolve())
+        with patch.object(HOOK.time, 'time', return_value=original[5] + 60):
+            HOOK.record_review(self.root, repo, 'main', True, True, True)
+        current = HOOK.load_review_receipt(self.root, repo.resolve())
+        self.assertEqual(current[-2:], original[-2:])
+        self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+
+    def test_expired_independent_review_remains_required_on_an_optional_base(self):
+        repo = self.feature_repo()
+        session = 'c5d6e36c-8110-438c-aa60-9abace804ddc'
+        report = {'verdict': 'pass', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
+            HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        clock_time = HOOK.time.time() + HOOK.REVIEW_MAX_AGE + 1
+        with patch.object(HOOK.time, 'time', return_value=clock_time):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+            self.assertEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+
+    def test_recording_on_another_branch_preserves_the_blocked_review(self):
+        repo = self.feature_repo()
+        session = '2cf817ea-0190-42d4-b05b-ffc6364dc772'
+        review = {'verdict': 'blocked', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', review)):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.git(repo, 'switch', '-c', 'other-feature')
+        (repo / 'app.txt').write_text('other feature\n')
+        self.git(repo, 'commit', '-qam', 'other change')
+        HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.git(repo, 'switch', 'feature')
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.assertEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+
+    def test_requested_review_holds_push_and_create_during_and_after_failure(self):
+        repo = self.feature_repo().resolve()
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        identity = HOOK.remote_identity(repo, 'origin')
+        boundaries = [{'action': 'push'}, {'action': 'create', 'base': 'main', 'head': 'feature'}]
+        outcomes = []
+
+        def observe_gates():
+            for boundary in boundaries:
+                outcomes.append(HOOK.check_review(self.root, repo, boundary))
+
+        def blocked_review(*args):
+            observe_gates()
+            return ('49b87145-5985-41c0-a5d6-25d861c7861c', '{}',
+                    {'verdict': 'blocked', 'findings': []})
+
+        with patch.object(HOOK, 'check_push'), patch.object(
+                HOOK, 'remote_repository_identity', return_value=identity), patch.object(
+                HOOK, 'remote_branch_sha', return_value=receipt['head']):
+            with patch.object(HOOK, 'run_independent_review', side_effect=blocked_review):
+                with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                    HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+            observe_gates()
+        self.assertEqual(len(outcomes), 4)
+        for output in outcomes:
+            self.assertIsNotNone(output)
+            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
+
+    def test_unsuccessful_independent_review_does_not_create_a_pass_receipt(self):
+        repo = self.feature_repo().resolve()
+        review = {'verdict': 'unverified', 'findings': []}
+        session = '3849d6e3-2d88-46b2-8295-9eb76570e960'
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', review)):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.assertIsNone(HOOK.load_review_receipt(self.root, repo))
+
+    def test_review_cli_choice_supports_single_provider_installations(self):
+        for reviewer in ('claude', 'codex'):
+            with self.subTest(reviewer=reviewer), patch.object(
+                    HOOK.shutil, 'which', side_effect=lambda name: '/tools/' + name if name == reviewer else None):
+                self.assertEqual(HOOK.select_reviewer(None), reviewer)
+        with patch.object(HOOK.shutil, 'which', side_effect=lambda name: '/tools/' + name):
+            with self.assertRaisesRegex(ValueError, 'Specify --reviewer'):
+                HOOK.select_reviewer(None)
+            self.assertEqual(HOOK.select_reviewer('claude'), 'claude')
+
+    def test_claude_review_verifies_native_init_result_and_session_identity(self):
+        session = '0905d5fe-e416-43f2-b54f-a70ccc572b4b'
+        report = {'base_sha': 'a' * 40, 'head_sha': 'b' * 40, 'verdict': 'pass',
+                  'summary': 'Diff reviewed.', 'findings': []}
+        init = {'type': 'system', 'subtype': 'init', 'session_id': session}
+        result = {'type': 'result', 'subtype': 'success', 'session_id': session,
+                  'is_error': False, 'structured_output': report}
+        events = '\n'.join(json.dumps(event) for event in (init, result))
+        self.assertEqual(HOOK.parse_independent_review(
+            events, None, report['base_sha'], report['head_sha'], 'claude'),
+            (session, json.dumps(report, ensure_ascii=False), report))
+        result['session_id'] = 'a different session'
+        events = '\n'.join(json.dumps(event) for event in (init, result))
+        with self.assertRaisesRegex(ValueError, 'completed independent Claude session'):
+            HOOK.parse_independent_review(events, None, report['base_sha'], report['head_sha'], 'claude')
+
+    def test_ordinary_push_uses_pr_intent_while_merge_requires_independent_proof(self):
+        repo = self.independent_policy_repo()
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        session = '22294f5c-ad95-43a4-97a1-dc5e265043d8'
+        report = {'verdict': 'blocked', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+
+        self.event('UserPromptSubmit', cwd=str(repo), prompt='plain push')
+        for command in ('git push', 'git push origin HEAD:refs/heads/feature'):
+            result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo),
+                                tool_input={'command': command})
+            self.assertNotEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        merge = self.merge_with_review(repo, receipt)
+        self.assertEqual(merge['permissionDecision'], 'deny')
+        self.assertIn('has not produced a passing report', merge['permissionDecisionReason'])
+
+    def test_replacement_ref_cannot_hide_the_original_base_review_policy(self):
+        repo = self.independent_policy_repo()
+        original = self.git(repo, 'rev-parse', 'main').strip()
+        replacement = self.git(repo, 'rev-parse', 'main^').strip()
+        self.git(repo, 'replace', original, replacement)
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.assertEqual(receipt['base'], original)
+        output = self.merge_with_review(repo, receipt)
+        self.assertEqual(output.get('permissionDecision'), 'deny')
+        self.assertIn('An independent review is required', output['permissionDecisionReason'])
+
+    def test_independent_report_requires_a_completed_session_and_matching_shas(self):
+        base, head = 'a' * 40, 'b' * 40
+        session = '1781d06f-4d89-4c14-ba15-ace8f3c61898'
+        started = json.dumps({'type': 'thread.started', 'thread_id': session})
+        complete = started + '\n' + json.dumps({'type': 'turn.completed'})
+        report = {'base_sha': base, 'head_sha': head, 'verdict': 'pass',
+                  'summary': 'Diff reviewed.', 'findings': []}
+        raw_report = json.dumps(report)
+        self.assertEqual(HOOK.parse_independent_review(complete, raw_report, base, head),
+                         (session, raw_report, report))
+        with self.assertRaisesRegex(ValueError, 'completed independent review session'):
+            HOOK.parse_independent_review(started, raw_report, base, head)
+        with self.assertRaisesRegex(ValueError, 'base and HEAD'):
+            HOOK.parse_independent_review(complete, raw_report, head, base)
+
+    def test_independent_review_requires_a_source_location_for_every_finding(self):
+        base, head = 'a' * 40, 'b' * 40
+        session = '613984ea-ab6e-4f54-b5b7-09477d21022f'
+        events = json.dumps({'type': 'thread.started', 'thread_id': session}) + '\n'
+        events += json.dumps({'type': 'turn.completed'})
+        report = {'base_sha': base, 'head_sha': head, 'verdict': 'pass', 'summary': 'Reviewed.'}
+        finding = {'priority': 'minor', 'path': 'app.txt', 'line': 1, 'description': 'Clarify wording.'}
+        report['findings'] = [finding]
+        self.assertEqual(HOOK.parse_independent_review(events, json.dumps(report), base, head)[2], report)
+        for changes in ({'path': None}, {'path': '/tmp/app.txt'}, {'path': '../app.txt'},
+                        {'line': None}, {'line': '1'}, {'line': True}, {'line': 0}):
+            with self.subTest(changes=changes):
+                report['findings'] = [{**finding, **changes}]
+                with self.assertRaisesRegex(ValueError, 'Invalid findings'):
+                    HOOK.parse_independent_review(events, json.dumps(report), base, head)
 
     def test_merge_requires_completed_known_ci_results(self):
         repo = self.feature_repo()

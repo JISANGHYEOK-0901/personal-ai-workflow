@@ -15,5 +15,6 @@
 - UI 변경 검증: 설치 범위 내 UI 변경은 현재 입력 해시에 연결된 Playwright 보고서·조작·스크린샷 근거가 있어야 Stop과 PR 경계를 통과한다. 프로젝트별 `.workflow-ui.json`의 paths/inputs/command/base로 설정하고 `--verify-ui`로 실행한다. 실제 실행 불가는 명시 미완료로만 종료하며 PR은 계속 차단한다. 회귀 검증: `tests/test_ui_gate.py`.
 
 - 동시 작업: 정합성 CI는 PR·develop/main push에서 실행한다. GitHub의 develop 보호는 Actions가 발행한 `integrity`를 최신 base 기준으로 관리자에게도 요구한다. 동시 머지는 pr-lifecycle의 조율 경계를 따르고 작업 branch를 과업별로 분리한다.
+- 독립 리뷰: 사용자 결정에 따라 신뢰된 런타임을 유지하고 새 독립 리뷰 훅은 격리 설치에서 검증한다. 작업공간에서 새 런타임의 실행을 확인한 뒤 대상 base의 `.workflow-pr.json`으로 필수 조건을 적용한다. `--record-pr-review --independent-review`는 구현과 같은 Claude Code 또는 Codex의 별도 읽기 전용 세션을 현재 base/HEAD에 연결한다. 도입 절차는 `docs/COMMUNICATION_HOOKS.md`를 따른다.
 
 - PR 요청 기본 범위: 사용자 지정으로 “PR해줘”는 검증·검토·PR 생성·머지·작업 브랜치 정리까지 포함. 생성만/검토만/머지 금지 등 명시 제한은 우선한다.

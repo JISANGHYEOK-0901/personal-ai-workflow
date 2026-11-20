@@ -63,7 +63,7 @@ python3 .workflow-hooks/communication.py \
 - `gh pr create --base <브랜치>`는 검토한 base의 **브랜치 이름**과 대조한다. `origin/develop`을 검토했다면 `--base develop`을 쓰며, 로컬 develop이 뒤처졌다는 이유로 거부하지 않는다. freshness는 검토한 ref의 SHA로 확인한다.
 - `--head <현재 브랜치>`를 반드시 명시한다. 생략하면 gh가 추적 설정에 따라 다른 브랜치·fork를 선택할 수 있으므로 거부한다. 다른 브랜치는 그 checkout에서 다시 검토한다. 생성 전에 push를 끝내고, `gh repo view`가 선택한 저장소와 `git ls-remote`로 읽은 실제 원격 head SHA를 증표와 대조한다. 대상 조회 실패·미push·원격 head 불일치 시 생성하지 않는다.
 - 일반 push는 설정된 remote 이름과 단일 refspec을 명시한다. 예: `git push -u origin HEAD:refs/heads/feature`. source SHA가 검토 HEAD와 같고 목적지는 현재 작업 브랜치여야 하며 원격 대상이 증표와 일치해야 한다. 암시적 push·다중 ref·`--all`·`--tags` 등은 이 게이트의 지원 경로가 아니다.
-- `gh --repo/-R`(분리형·붙임형)는 값이 검토한 checkout의 원격 저장소와 같을 때만 허용한다. `OWNER/REPO`는 github.com 기준이며 `HOST/OWNER/REPO`와 URL도 비교한다. 다른 저장소를 가리키면 그 저장소 checkout을 도구 작업 디렉터리로 지정하거나 단독 `cd <checkout> && gh …`로 실행하라고 안내하며 거부한다. `--hostname`, 빈 값·반복 지정, `GH_REPO` 등 대상에 영향을 주는 환경 지정, `git -c` 등 실행 환경 변경은 거부한다. 명령 문자열의 환경 할당을 제거한 뒤 다른 대상으로 검사하지 않는다.
+- `gh --repo/-R`(분리형·붙임형)는 값이 검토한 checkout의 원격 저장소와 같을 때만 허용한다. 독립 리뷰 증거를 검증하는 머지에서 `--repo`를 쓰면 CLI 기본 호스트에 영향을 받지 않도록 `HOST/OWNER/REPO`를 명시한다. 일반 머지의 `OWNER/REPO`는 gh가 조회한 실제 저장소와 대조한다. 생성에서 사용하는 `OWNER/REPO`는 github.com 기준이며 호스트를 명시한 값과 URL도 비교한다. 다른 저장소를 가리키면 그 저장소 checkout을 도구 작업 디렉터리로 지정하거나 단독 `cd <checkout> && gh …`로 실행하라고 안내하며 거부한다. `--hostname`, 빈 값·반복 지정, `GH_REPO` 등 대상에 영향을 주는 환경 지정, `git -c` 등 실행 환경 변경은 거부한다. 명령 문자열의 환경 할당을 제거한 뒤 다른 대상으로 검사하지 않는다.
 
 `gh pr merge`는 숫자 PR 번호와 검토한 전체 HEAD SHA를 모두 명시해야 한다.
 
@@ -72,6 +72,26 @@ gh pr merge 123 --merge --match-head-commit <reviewed-full-head-sha>
 ```
 
 PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft·mergeable 상태, PR 번호, 저장소 식별값, 원격 base 브랜치와 base/head SHA, 현재 CI rollup을 확인한다. 원격 base/head가 증표와 다르거나 CI 목록이 비어 있거나 pending·실패·미확인이면 merge를 거부한다. StatusContext는 `SUCCESS`만 허용하며 `EXPECTED`도 미완료로 처리한다. CheckRun은 `COMPLETED`와 `SUCCESS/NEUTRAL/SKIPPED` 결론이 모두 있어야 한다. 프로젝트가 요구하는 개별 체크의 이름과 발행 앱은 서버 보호 설정에서 확인한다. 조회는 읽기 전용이지만 GitHub 인증·네트워크가 필요하고 확인할 수 없는 해당 PR 명령은 fail closed다. `--admin` 우회와 `--delete-branch` 동시 삭제는 허용하지 않으며 삭제는 아래 정리 경로로 분리한다.
+
+### 독립 리뷰 증거
+
+새 머지 훅은 대상 base의 `.workflow-pr.json`에 `"require_independent_review": true`가 있으면 독립 리뷰 증거를 요구한다. 정책을 base 커밋에서 읽으므로 검토할 head가 파일을 변경해도 현재 머지 조건은 해당 base를 따른다. 정책을 적용하는 환경에서는 최종 커밋 검토 명령에 `--independent-review`를 추가한다. 증표가 없거나 만료됐을 때는 조회한 PR의 base 정책과 같은 SHA의 증거를 확인해 복구 명령을 제시한다. 유효한 독립 증거가 있으면 일반 갱신으로 재사용한다.
+
+실제 작업공간에 새 런타임을 설치한 뒤 `--check`와 사용하는 도구의 훅 실행을 확인한다. 독립 리뷰 정책의 도입 요건은 GitHub의 클래식 브랜치 보호다. 대상 base에 필수 CI, 최신 base 반영, 관리자 적용을 설정하고 새 훅에서 해당 보호를 확인한다. [도구에서 활성화 확인](#도구에서-활성화-확인)을 따른 다음 대상 base에 다음 정책을 반영한다.
+
+```json
+{"require_independent_review": true}
+```
+
+현재 저장소는 기존 신뢰 훅을 쓰고, 새 필수 정책은 격리 설치와 테스트 base에서 검증한다. 정본의 `python3 hooks/communication.py`로 증표를 기록하는 경로도 사용할 수 있다. 운영 강제 상태는 해당 도구의 설치된 런타임 실행과 대상 base 정책을 함께 확인한다.
+
+명시적으로 실행한 독립 리뷰는 PR diff, merge base 이후 대상 base의 변경, 현재 head 파일을 준비하고 구현과 같은 도구의 별도 읽기 전용 세션을 한 번 실행한다. 두 CLI가 설치돼 있으면 `--reviewer claude` 또는 `--reviewer codex`로 현재 도구를 지정한다. 하나가 설치돼 있으면 그 CLI를 선택한다. 세션은 명령이 자동으로 시작한다. 같은 SHA의 유효한 보고서를 가지고 있으면 일반 증표를 갱신해 사용한다.
+
+리뷰어는 해당 CLI의 기존 로그인과 해당 도구에 내보낸 인증 환경을 사용한다. Claude Code는 `ANTHROPIC_API_KEY`와 공급자 선택 환경도 이어받는다. Codex의 비대화형 API 키는 `CODEX_API_KEY`를 사용한다. 별도 Responses API 호환 엔드포인트가 필요하면 `CODEX_API_KEY`와 `WORKFLOW_CODEX_REVIEW_BASE_URL`을 리뷰 명령 환경에 설정하고, 모델은 `WORKFLOW_CODEX_REVIEW_MODEL`로 지정할 수 있다. Codex는 사용자 도구 설정과 룰을 읽지 않으며 읽기 전용 셸 명령에 CLI 인증 환경을 전달하지 않는다. [Claude Code 환경 변수](https://code.claude.com/docs/en/env-vars), [Codex 비대화형 인증](https://developers.openai.com/codex/noninteractive)
+
+저장소의 Git 객체 형식을 사용하고 상속된 Git 설정과 훅 없이 merge base와 양쪽 tip을 얕게 가져온다. checkout 전에 두 diff를 만들어 변경된 텍스트가 경로별 diff 속성에 의해 가려지지 않게 한다. Git이 바이너리로 분류한 변경은 원본 바이트를 객체 ID로 보관하고 `binary-files.json`에서 각 경로의 변경 전후 객체를 찾을 수 있게 한다. 배치한 head 파일의 경로와 바이트를 Git 객체와 대조한다. 파일시스템 대소문자 충돌 등으로 파일을 재현할 수 없으면 미검증으로 처리한다. 대조가 끝나면 Git 메타데이터를 제거한다. 심볼릭 링크는 기록된 대상 문자열로 전달한다. 양쪽 diff에 바뀐 서브모듈 참조가 있으면 해당 소스의 검증 근거가 부족하므로 미검증으로 처리한다. 리뷰 제한은 180초다. 완료 세션이 정확한 SHA의 보고서를 반환하면 원문을 소유자만 읽고 쓸 수 있는 `ai-input/hook-state/pr-review-<세션 ID>.json`에 보관하고 해시를 증표에 연결한다. 같은 저장소·base/head의 독립 리뷰를 시작하면 통과까지 검토 증표를 요구하는 PR 경계가 대기하며, 실패 상태의 원문도 로컬에 남는다. 일반 push의 검토 증표 적용은 위의 PR 의도 규칙을 따른다.
+
+머지 직전 증거가 누락되었거나 변경됐거나 저장소와 SHA가 다르면 거부한다. 독립 리뷰가 필요한 직접 머지는 현재 SHA를 대상으로 즉시 실행한다. `--auto` 또는 GitHub merge queue는 나중에 바뀐 base를 결합할 수 있으므로 해당 경로에서는 차단한다. PR의 base/head, 큐, 최신 base를 요구하는 관리자 적용 브랜치 보호, head의 통합 CI 상태를 한 번의 GitHub 조회에서 확인한 뒤 증표와 원문을 다시 확인한다. PR 경계의 Git·GitHub 조회와 검토 상태 확인은 공유된 12초 제한 안에서 수행한다. [GitHub CLI 머지 동작](https://cli.github.com/manual/gh_pr_merge) 정책과 검토 상태를 확인할 때는 원본 Git 객체를 사용한다. 독립 리뷰 상태는 일반 증표와 별도로 설치 작업공간에 저장하며 저장소 식별값과 base/head SHA로 찾는다. 다른 브랜치의 증표나 일반 갱신은 상태와 만료 시각에 영향을 주지 않는다. 만료한 리뷰는 현재 기선에서 다시 받아야 한다. 새 독립 리뷰가 시작되면 늦게 끝난 이전 리뷰가 새 시도를 덮어쓰지 않는다. GitHub의 브랜치 보호와 필수 CI는 별도로 적용된다. 이 증거로 확인하는 독립성은 별도 도구 세션이며, GitHub의 사람 승인이나 운영체제 수준의 검토 격리는 해당 환경의 정책에 따른다.
 
 ### 머지 후 정리 증표
 
@@ -103,7 +123,7 @@ Stop은 최종 답변의 특정 단어, ‘미결사항 없음’ 선언, 작업
 - 셸의 Python/Node/셸 스크립트 등은 내용이 불투명하므로 편집 상기만 제공한다. 인용된 예제 문자열이나 heredoc 본문을 배포 명령으로 해석하지 않는다.
 - 읽기 명령, 문서·이미지·테스트·개인 기록·도구 설정 파일만의 변경에는 종료 재점검을 추가하지 않는다.
 
-이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 웹에서 직접 만든 PR을 모두 포괄하지 않는다. `gh pr merge`의 직접 경로는 원격 PR과 로컬 검토 증거를 결속하지만 조회와 실제 merge 사이의 경쟁을 원자적으로 막지는 못한다. `--match-head-commit`은 head 전진을 막고 base 경쟁은 서버 보호·머지 큐가 담당한다. 로컬 훅을 비활성화하거나 설정 신뢰를 해제하면 우회할 수 있으므로 저장소 전체 강제력에는 서버의 필수 CI·브랜치 보호를 함께 사용한다.
+이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 웹에서 직접 만든 PR을 모두 포괄하지 않는다. `gh pr merge`의 직접 경로는 원격 PR과 로컬 검토 증거를 결속하지만 조회와 실제 merge 사이의 경쟁을 원자적으로 막지는 못한다. `--match-head-commit`은 서버가 허용할 head를 고정한다. 독립 리뷰 경로의 최신 base 보호는 조회 이후 새 base가 head에 포함되지 않은 PR의 머지를 서버에서 막는다. 같은 대상 브랜치가 head에 포함된 조상으로만 전진했다면 merge commit의 파일 트리는 검토한 head와 일치한다. 이 경우에도 실제 base SHA는 조회 시점과 다를 수 있다. 동시 PR 대상 변경까지 포함한 base/head 원자성은 GitHub API의 제약으로 남는다. [GitHub 머지 API의 SHA 조건](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request) 로컬 훅을 비활성화하거나 설정 신뢰를 해제하면 우회할 수 있으므로 저장소 전체 강제력에는 서버의 필수 CI·브랜치 보호를 함께 사용한다.
 
 ## 설치·갱신·제거
 
@@ -134,7 +154,7 @@ python3 scripts/install_communication_hooks.py --target /path/to/workspace --rem
 
 ## 상태·비용·실패 처리
 
-별도 모델 호출이나 대화 원문 수집은 없다. 일반 전달 이벤트는 네트워크를 사용하지 않는다. PR 생성은 선택된 저장소와 원격 브랜치를, merge·정리 증표 기록·삭제 검사는 GitHub PR 상태를 읽는다. 로컬 SQLite에는 반복 억제용 세션·디렉터리 해시와 단계 상태, 위 검토 증표 및 PR 번호·Git ref/SHA·원격 식별 해시에 묶인 정리 증표를 보존한다. 명령·프롬프트·답변·인증값·실제 경로는 기록하지 않는다. 14일 지난 세션 상태는 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
+일반 전달 이벤트는 네트워크나 모델 호출을 사용하지 않는다. PR 생성은 선택된 저장소와 원격 브랜치를, merge·정리 증표 기록·삭제 검사는 GitHub PR 상태를 읽는다. 로컬 SQLite에는 반복 억제용 세션·디렉터리 해시와 단계 상태, 위 검토 증표 및 PR 번호·Git ref/SHA·원격 식별 해시에 묶인 정리 증표를 보존한다. 명시적으로 실행한 독립 리뷰는 별도 모델 세션을 열고 최종 리뷰 원문을 개인 기록에 보관한다. 일반 세션의 명령·프롬프트·답변·인증값은 수집하지 않는다. 14일 지난 세션 상태는 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
 
 Codex는 turn_id를 사용하고 Claude는 UserPromptSubmit으로 입력 경계를 만든다. 경계가 없으면 이전 작업을 추정해 Stop을 재개하지 않는다. Claude에서 시작 이벤트 자체가 누락·실패한 뒤 이전 턴의 정상 상태만 남으면 새 입력인지 구분할 수 없다. 이 경우까지 일반 push의 PR 의도를 보장하지 않으며, 직접 create/merge·삭제 검사는 입력 의도와 무관하게 적용한다. 서브에이전트 전용 훅은 등록하지 않으며 모든 병렬·서브에이전트 상황의 동등성은 미검증이다.
 
