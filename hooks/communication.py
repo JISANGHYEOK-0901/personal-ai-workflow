@@ -700,8 +700,8 @@ def safe_state_path(root):
 
 
 def git_output(repo, *args, allowed=(0,), timeout=5, env=None):
-    result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True,
-                            timeout=timeout, env=env, check=False)
+    result = subprocess.run(['git', '-C', str(repo), '--no-replace-objects', *args],
+                            capture_output=True, timeout=timeout, env=env, check=False)
     if result.returncode not in allowed:
         raise ValueError('Git state could not be verified')
     return result.stdout, result.returncode
@@ -1459,6 +1459,50 @@ def check_review(root, cwd, boundary, reviewer=None):
             + command)
 
 
+def check_requested_independent_push(root, cwd, boundary, reviewer):
+    try:
+        repo = resolve_repo(root, cwd, boundary.get('repo'))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+    try:
+        remotes = named_remotes(repo)
+        remote = boundary.get('remote')
+        candidates = [remote] if remote in remotes else remotes
+        identities = set()
+        for name in candidates:
+            urls, _ = git_output(repo, 'remote', 'get-url', '--push', '--all', name)
+            for url in urls.decode().splitlines():
+                try:
+                    identities.add(digest(repository_identity(url)))
+                except ValueError:
+                    continue
+        if not identities:
+            return None
+        with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
+            ensure_review_table(db)
+            placeholders = ','.join('?' for _ in identities)
+            rows = db.execute(
+                'SELECT repository_identity, base_sha, head_sha, proof, updated '
+                f'FROM independent_reviews WHERE repository_identity IN ({placeholders})',
+                sorted(identities),
+            ).fetchall()
+        if not rows:
+            return None
+        refspec = boundary.get('refspec')
+        if (boundary.get('error') or remote not in remotes or not isinstance(refspec, str)
+                or not refspec or '*' in refspec or refspec.count(':') > 1):
+            raise ValueError('Use one named remote and a literal refspec for independently reviewed pushes')
+        source, _, _ = refspec.partition(':')
+        source_sha = commit_sha(repo, source.lstrip('+'))
+        for identity, base_sha, head_sha, proof, updated in rows:
+            if head_sha == source_sha:
+                verify_independent_review(root, proof, updated, base_sha, head_sha, identity)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError, sqlite3.Error) as exc:
+        command = review_record_command(root, repo) + f' --independent-review --reviewer {reviewer}'
+        return deny('Independent review blocked this push: ' + str(exc) + '. Review command:\n' + command)
+    return None
+
+
 def session_context(payload, engine, root):
     """Return advisory output and True/False/None for this turn's PR intent."""
     event = payload.get('hook_event_name')
@@ -1847,8 +1891,11 @@ def handle(payload, engine, root):
         # tool events do not carry a stable user-turn identifier.
         intent = None
     # Missing or unreadable prompt state cannot establish that review is unnecessary.
-    if ordinary_push and intent is not False:
-        blocked = check_review(root, command_cwd, boundary, reviewer=engine)
+    if ordinary_push:
+        if intent is False:
+            blocked = check_requested_independent_push(root, command_cwd, boundary, engine)
+        else:
+            blocked = check_review(root, command_cwd, boundary, reviewer=engine)
         if blocked:
             return blocked
     return output

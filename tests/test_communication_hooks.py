@@ -559,6 +559,33 @@ class CommunicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'completed independent Claude session'):
             HOOK.parse_independent_review(events, None, report['base_sha'], report['head_sha'], 'claude')
 
+    def test_non_pr_push_checks_any_independent_review_for_its_source_sha(self):
+        repo = self.feature_repo()
+        session = '22294f5c-ad95-43a4-97a1-dc5e265043d8'
+        report = {'verdict': 'blocked', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.git(repo, 'remote', 'add', 'local', str(self.root / 'other'))
+        self.event('UserPromptSubmit', cwd=str(repo), prompt='plain push')
+        for remote, source, allowed in (('origin', 'HEAD', False), ('origin', 'main', True),
+                                        ('local', 'HEAD', True)):
+            result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                'command': f'git push {remote} {source}:refs/heads/feature'})
+            self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision') != 'deny',
+                             allowed, result)
+
+    def test_replacement_ref_cannot_hide_the_original_base_review_policy(self):
+        repo = self.independent_policy_repo()
+        original = self.git(repo, 'rev-parse', 'main').strip()
+        replacement = self.git(repo, 'rev-parse', 'main^').strip()
+        self.git(repo, 'replace', original, replacement)
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.assertEqual(receipt['base'], original)
+        output = self.merge_with_review(repo, receipt)
+        self.assertEqual(output.get('permissionDecision'), 'deny')
+        self.assertIn('An independent review is required', output['permissionDecisionReason'])
+
     def test_independent_report_requires_a_completed_session_and_matching_shas(self):
         base, head = 'a' * 40, 'b' * 40
         session = '1781d06f-4d89-4c14-ba15-ace8f3c61898'
