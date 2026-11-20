@@ -457,6 +457,64 @@ class CommunicationTests(unittest.TestCase):
                 HOOK.run_independent_review(repo, base, head)
         self.assertFalse(marker.exists())
 
+    def test_independent_reviewer_subprocess_keeps_selected_api_auth(self):
+        repo = self.feature_repo()
+        base = self.git(repo, 'rev-parse', 'main')
+        head = self.git(repo, 'rev-parse', 'HEAD')
+        session = 'c3d22a2c-4066-43b7-bd80-9a7f3643eb5a'
+        report = {'base_sha': base, 'head_sha': head, 'verdict': 'pass',
+                  'summary': 'Checked committed diff.', 'findings': []}
+        binaries = self.root / 'test-bin'
+        binaries.mkdir()
+        source = f"""#!{sys.executable}
+import json
+import os
+from pathlib import Path
+import sys
+args = sys.argv
+report = {report!r}
+session = {session!r}
+if Path(args[0]).name == 'claude':
+    assert os.environ.get('ANTHROPIC_API_KEY') == 'fixture-claude-key'
+    assert os.environ.get('CLAUDE_CODE_USE_BEDROCK') == '1'
+    assert 'CODEX_API_KEY' not in os.environ and 'CLAUDECODE' not in os.environ
+    assert '--restricted' in args and '--safe-mode' in args
+    assert args[args.index('--tools') + 1] == 'Read,Glob,Grep'
+    print(json.dumps(dict(type='system', subtype='init', session_id=session)))
+    print(json.dumps(dict(type='result', subtype='success', is_error=False,
+                          session_id=session, structured_output=report)))
+else:
+    assert os.environ.get('CODEX_API_KEY') == 'fixture-codex-key'
+    assert 'ANTHROPIC_API_KEY' not in os.environ
+    assert args[args.index('--sandbox') + 1] == 'read-only'
+    assert '--ignore-user-config' in args
+    assert 'shell_environment_policy.inherit="none"' in args
+    assert 'openai_base_url="https://codex.fixture.invalid/v1"' in args
+    assert args[args.index('--model') + 1] == 'fixture-model'
+    Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps(report))
+    print(json.dumps(dict(type='thread.started', thread_id=session)))
+    print(json.dumps(dict(type='turn.completed')))
+"""
+        for reviewer in ('claude', 'codex'):
+            executable = binaries / reviewer
+            executable.write_text(source)
+            executable.chmod(0o700)
+        variables = {
+            'PATH': str(binaries) + os.pathsep + os.environ.get('PATH', os.defpath),
+            'CLAUDECODE': '1',
+            'ANTHROPIC_API_KEY': 'fixture-claude-key',
+            'CLAUDE_CODE_USE_BEDROCK': '1',
+            'CODEX_API_KEY': 'fixture-codex-key',
+            'WORKFLOW_CODEX_REVIEW_BASE_URL': 'https://codex.fixture.invalid/v1',
+            'WORKFLOW_CODEX_REVIEW_MODEL': 'fixture-model',
+        }
+        with patch.dict(os.environ, variables):
+            for reviewer in ('claude', 'codex'):
+                with self.subTest(reviewer=reviewer):
+                    identity, _, result = HOOK.run_independent_review(repo, base, head, reviewer)
+                    self.assertEqual(identity, session)
+                    self.assertEqual(result, report)
+
     def test_refresh_preserves_passing_review_and_its_original_age(self):
         repo = self.independent_policy_repo()
         session = 'dc71fc91-10c3-43f4-9cc4-cfc3e0b77c46'
@@ -602,6 +660,22 @@ class CommunicationTests(unittest.TestCase):
             HOOK.parse_independent_review(started, raw_report, base, head)
         with self.assertRaisesRegex(ValueError, 'base and HEAD'):
             HOOK.parse_independent_review(complete, raw_report, head, base)
+
+    def test_independent_review_requires_a_source_location_for_every_finding(self):
+        base, head = 'a' * 40, 'b' * 40
+        session = '613984ea-ab6e-4f54-b5b7-09477d21022f'
+        events = json.dumps({'type': 'thread.started', 'thread_id': session}) + '\n'
+        events += json.dumps({'type': 'turn.completed'})
+        report = {'base_sha': base, 'head_sha': head, 'verdict': 'pass', 'summary': 'Reviewed.'}
+        finding = {'priority': 'minor', 'path': 'app.txt', 'line': 1, 'description': 'Clarify wording.'}
+        report['findings'] = [finding]
+        self.assertEqual(HOOK.parse_independent_review(events, json.dumps(report), base, head)[2], report)
+        for changes in ({'path': None}, {'path': '/tmp/app.txt'}, {'path': '../app.txt'},
+                        {'line': None}, {'line': '1'}, {'line': True}, {'line': 0}):
+            with self.subTest(changes=changes):
+                report['findings'] = [{**finding, **changes}]
+                with self.assertRaisesRegex(ValueError, 'Invalid findings'):
+                    HOOK.parse_independent_review(events, json.dumps(report), base, head)
 
     def test_merge_requires_completed_known_ci_results(self):
         repo = self.feature_repo()

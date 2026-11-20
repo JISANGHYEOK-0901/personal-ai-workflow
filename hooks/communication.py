@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Communication reminders and a local PR diff-review gate; no model calls."""
+"""Communication reminders, local PR gates, and explicit independent review."""
 import argparse
 from contextlib import closing
 import fnmatch
@@ -942,14 +942,39 @@ def parse_independent_review(events, raw_report, base_sha, head_sha, reviewer='c
     if report.get('verdict') not in ('pass', 'blocked', 'unverified'):
         raise ValueError('The independent report has no valid verdict')
     findings = report.get('findings')
-    if not isinstance(findings, list) or any(
-            not isinstance(finding, dict)
-            or finding.get('priority') not in ('blocker', 'major', 'minor')
-            or not isinstance(finding.get('description'), str)
-            or not finding['description'].strip()
-            for finding in findings):
+    if not isinstance(findings, list):
         raise ValueError('Invalid findings in the independent report')
+    for finding in findings:
+        if (not isinstance(finding, dict)
+                or set(finding) != {'priority', 'path', 'line', 'description'}
+                or finding['priority'] not in ('blocker', 'major', 'minor')
+                or not isinstance(finding['description'], str)
+                or not finding['description'].strip()):
+            raise ValueError('Invalid findings in the independent report')
+        path, line = finding['path'], finding['line']
+        if (not isinstance(path, str) or not path.strip() or '\0' in path or '\\' in path
+                or re.match(r'^[a-zA-Z]:', path) or Path(path).is_absolute()
+                or not Path(path).name or '..' in Path(path).parts or type(line) is not int or line < 1):
+            raise ValueError('Invalid findings in the independent report')
     return session, raw_report, report
+
+
+def codex_review_options(environment):
+    # Keep the CLI's auth cache and permit an explicit endpoint without loading user hooks or MCP tools.
+    options = ['-c', 'cli_auth_credentials_store="auto"']
+    model = environment.pop('WORKFLOW_CODEX_REVIEW_MODEL', '')
+    if model:
+        options.extend(['--model', model])
+    endpoint = environment.pop('WORKFLOW_CODEX_REVIEW_BASE_URL', '')
+    if endpoint:
+        url = urlsplit(endpoint)
+        if (url.scheme not in ('http', 'https') or not url.hostname or url.username is not None
+                or url.password is not None or url.query or url.fragment):
+            raise ValueError('Use a Codex review base URL without embedded credentials or query parameters')
+        if not environment.get('CODEX_API_KEY'):
+            raise ValueError('Set CODEX_API_KEY when specifying a Codex review base URL')
+        options.extend(['-c', 'openai_base_url=' + json.dumps(endpoint, ensure_ascii=False)])
+    return options
 
 
 def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
@@ -987,11 +1012,14 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         scratch = Path(directory).resolve()
         checkout = scratch / 'checkout'
         checkout.mkdir()
-        environment = {name: value for name, value in os.environ.items()
-                       if not name.startswith('GIT_') and name not in {
-                           'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDECODE',
-                           'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
-                       }}
+        claude_auth = {'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+                       'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK',
+                       'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'}
+        codex_auth = {'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_API_KEY', 'OPENAI_BASE_URL'}
+        inherited = os.environ.copy()
+        excluded = claude_auth | codex_auth | {'CLAUDECODE'}
+        environment = {name: value for name, value in inherited.items()
+                       if not name.startswith('GIT_') and name not in excluded}
         environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                            GIT_ATTR_NOSYSTEM='1')
         git_output(checkout, 'init', '--quiet', '--template=', env=environment)
@@ -1004,6 +1032,8 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
                              base_sha + '...' + head_sha, timeout=60, env=environment)
         (scratch / 'review.patch').write_bytes(diff)
         report_path = scratch / 'report.json'
+        auth = claude_auth if reviewer == 'claude' else codex_auth
+        environment.update({name: inherited[name] for name in auth if name in inherited})
         if reviewer == 'claude':
             command = [
                 'claude', '--restricted', '--safe-mode', '-p', '--verbose',
@@ -1018,13 +1048,18 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
             schema_path.write_text(json.dumps(schema), encoding='utf-8')
             command = [
                 'codex', '-a', 'never', 'exec', '--json', '--ephemeral', '--ignore-user-config',
-                '--sandbox', 'read-only', '--skip-git-repo-check', '-c', 'model_reasoning_effort="low"',
+                '--sandbox', 'read-only', '--ignore-rules', '--skip-git-repo-check',
+                '-c', 'model_reasoning_effort="low"', '-c', 'web_search="disabled"',
+                '-c', 'agents.enabled=false', '-c', 'allow_login_shell=false',
+                '-c', 'shell_environment_policy.inherit="none"',
+                *codex_review_options(environment),
                 '--output-schema', str(schema_path), '--output-last-message', str(report_path), prompt,
             ]
         result = subprocess.run(command, cwd=scratch, env=environment, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=180, check=False)
         if result.returncode or (reviewer == 'codex' and not report_path.is_file()):
-            raise ValueError(f'The read-only {reviewer} reviewer did not return a report')
+            raise ValueError(f'The read-only {reviewer} reviewer did not return a report. '
+                             'Check the CLI authentication or reviewer provider settings')
         raw_report = report_path.read_text(encoding='utf-8') if reviewer == 'codex' else None
         return parse_independent_review(result.stdout, raw_report, base_sha, head_sha, reviewer)
 
