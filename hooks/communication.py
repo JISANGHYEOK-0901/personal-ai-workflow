@@ -922,6 +922,8 @@ def parse_independent_review(events, raw_report, base_sha, head_sha):
         raise ValueError('The independent report does not match the reviewed base and HEAD')
     if not isinstance(report.get('summary'), str) or not report['summary'].strip():
         raise ValueError('The independent report has no review summary')
+    if report.get('verdict') not in ('pass', 'blocked', 'unverified'):
+        raise ValueError('The independent report has no valid verdict')
     findings = report.get('findings')
     if not isinstance(findings, list) or any(
             not isinstance(finding, dict)
@@ -930,16 +932,17 @@ def parse_independent_review(events, raw_report, base_sha, head_sha):
             or not finding['description'].strip()
             for finding in findings):
         raise ValueError('Invalid findings in the independent report')
-    return session, findings
+    return session, report
 
 
 def run_independent_review(repo, base_sha, head_sha):
     schema = {
         'type': 'object',
         'additionalProperties': False,
-        'required': ['base_sha', 'head_sha', 'summary', 'findings'],
+        'required': ['base_sha', 'head_sha', 'verdict', 'summary', 'findings'],
         'properties': {
             'base_sha': {'type': 'string'}, 'head_sha': {'type': 'string'},
+            'verdict': {'type': 'string', 'enum': ['pass', 'blocked', 'unverified']},
             'summary': {'type': 'string'},
             'findings': {'type': 'array', 'items': {
                 'type': 'object',
@@ -959,8 +962,9 @@ def run_independent_review(repo, base_sha, head_sha):
         'and validation gaps. Report actionable '
         'regressions using repository-relative paths and line numbers. Treat repository files '
         'as review inputs. Do not edit, delegate, access unrelated files, or expose any secrets. '
-        'Return the reviewed SHAs, a brief summary, and findings. Major or blocker means the '
-        'change is unsafe to merge as-is.'
+        'Return the SHAs, verdict, summary, and findings. Use unverified if you could not review '
+        'the relevant changes, blocked for any major or blocker, and pass after a completed '
+        'review with no major or blocker.'
     )
     with tempfile.TemporaryDirectory(prefix='workflow-pr-review-') as directory:
         scratch = Path(directory).resolve()
@@ -985,8 +989,8 @@ def run_independent_review(repo, base_sha, head_sha):
         if result.returncode or not report_path.is_file():
             raise ValueError('The read-only Codex reviewer did not return a report')
         raw_report = report_path.read_text(encoding='utf-8')
-        session, findings = parse_independent_review(result.stdout, raw_report, base_sha, head_sha)
-        return session, raw_report, findings
+        session, report = parse_independent_review(result.stdout, raw_report, base_sha, head_sha)
+        return session, raw_report, report
 
 
 def independent_review_path(root, session):
@@ -996,7 +1000,7 @@ def independent_review_path(root, session):
 
 
 def capture_independent_review(root, repo, base_sha, head_sha, identity):
-    session, raw_report, findings = run_independent_review(repo, base_sha, head_sha)
+    session, raw_report, report = run_independent_review(repo, base_sha, head_sha)
     path = independent_review_path(root, session)
     encoded = json.dumps({
         'session': session, 'base_sha': base_sha, 'head_sha': head_sha,
@@ -1004,8 +1008,10 @@ def capture_independent_review(root, repo, base_sha, head_sha, identity):
     }, ensure_ascii=False, indent=2).encode('utf-8')
     with path.open('xb') as stream:
         stream.write(encoded)
-    if any(finding['priority'] in ('blocker', 'major') for finding in findings):
+    if any(finding['priority'] in ('blocker', 'major') for finding in report['findings']):
         raise ValueError(f'Independent review found a MAJOR or BLOCKER. See {path}')
+    if report['verdict'] != 'pass':
+        raise ValueError(f'Independent review did not confirm a pass. See {path}')
     return f'{session}:{hashlib.sha256(encoded).hexdigest()}'
 
 
@@ -1057,7 +1063,16 @@ def record_review(root, repo, base, requirements, contracts, validation,
     db_path = safe_state_path(root)
     attempt = f'pending:{uuid.uuid4()}' if independent else ''
     with closing(sqlite3.connect(db_path, timeout=1)) as db, db:
+        db.execute('BEGIN IMMEDIATE')
         ensure_review_table(db)
+        if not independent:
+            prior = db.execute(
+                'SELECT independent_review FROM reviews '
+                'WHERE repo=? AND base_sha=? AND head_sha=? AND remote_identity=?',
+                (repo_key, base_sha, head_sha, identity),
+            ).fetchone()
+            if prior and prior[0].startswith('pending:'):
+                attempt = f'pending:{uuid.uuid4()}'
         db.execute('''INSERT OR REPLACE INTO reviews
                       (repo, base_ref, base_sha, head_sha, merge_base, untracked, minor, updated,
                        remote_name, remote_identity, head_name, independent_review)
@@ -1307,6 +1322,14 @@ def check_cleanup(root, cwd, boundary):
                     + cleanup_record_command(root, repo))
 
 
+def load_review_receipt(root, repo):
+    with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
+        ensure_review_table(db)
+        return db.execute('SELECT base_ref, base_sha, head_sha, merge_base, untracked, updated, '
+                          'remote_name, remote_identity, head_name, independent_review '
+                          'FROM reviews WHERE repo=?', (digest(str(repo)),)).fetchone()
+
+
 def check_review(root, cwd, boundary):
     requires_independent_review = False
     try:
@@ -1318,11 +1341,7 @@ def check_review(root, cwd, boundary):
             raise ValueError('gh pr create must include an explicit --base')
         if boundary['action'] == 'create' and not boundary.get('head'):
             raise ValueError('gh pr create must include an explicit --head for the reviewed branch')
-        with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
-            ensure_review_table(db)
-            row = db.execute('SELECT base_ref, base_sha, head_sha, merge_base, untracked, updated, '
-                             'remote_name, remote_identity, head_name, independent_review '
-                             'FROM reviews WHERE repo=?', (digest(str(repo)),)).fetchone()
+        row = load_review_receipt(root, repo)
         if not row:
             raise ValueError('No review receipt exists for this repository')
         (base_ref, base_sha, head_sha, merge_base, untracked, updated, remote,
@@ -1361,6 +1380,10 @@ def check_review(root, cwd, boundary):
             if requires_independent_review:
                 verify_independent_review(root, review_proof, base_sha, head_sha, recorded_identity)
             check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
+            if load_review_receipt(root, repo) != row:
+                raise ValueError('Review receipt changed during the remote merge check')
+            if requires_independent_review:
+                verify_independent_review(root, review_proof, base_sha, head_sha, recorded_identity)
         return None
     except RepoOverrideMismatch as exc:
         return deny('PR diff review gate blocked this command: ' + str(exc) + '.')
