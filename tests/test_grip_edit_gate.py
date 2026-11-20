@@ -90,6 +90,14 @@ class GripEditGateTests(unittest.TestCase):
             'tool_input': {'file_path': str(self.dependent)}, 'cwd': str(self.target),
         }, 'claude', self.target), {})
 
+    def test_installation_root_alias_keeps_the_edit_gate(self):
+        alias = self.root.parent / 'workspace-alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        self.assert_denied(HOOK.handle({
+            'hook_event_name': 'PreToolUse', 'tool_name': 'Edit',
+            'tool_input': {'file_path': str(self.dependent)}, 'cwd': str(alias),
+        }, 'claude', alias))
+
     def test_a_removed_topic_cannot_clear_its_explicitly_registered_paths(self):
         self.register.write_text(
             '```grip-edit-scope\n' + json.dumps(self.scope) + '\n```\n', encoding='utf-8',

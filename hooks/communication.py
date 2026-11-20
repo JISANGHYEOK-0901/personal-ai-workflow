@@ -1495,7 +1495,7 @@ def grip_edit_gate(payload, root):
     cwd = payload.get('cwd')
     if not paths or not isinstance(cwd, str) or not Path(cwd).is_absolute():
         return {}
-    registry = root / 'ai-input' / 'grip'
+    registry = root.resolve() / 'ai-input' / 'grip'
     if not registry.is_dir() or registry.resolve() != registry:
         return {}
     edits = {(Path(cwd) / path).resolve() for path in paths}
