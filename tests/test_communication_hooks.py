@@ -407,7 +407,7 @@ class CommunicationTests(unittest.TestCase):
         self.assertIn('base SHA does not match', advanced['permissionDecisionReason'])
         unprotected = self.merge_with_review(repo, receipt, protected=False)
         self.assertEqual(unprotected['permissionDecision'], 'deny')
-        self.assertIn('up-to-date check protection', unprotected['permissionDecisionReason'])
+        self.assertIn('classic GitHub branch protection', unprotected['permissionDecisionReason'])
 
     def test_new_blocking_independent_review_revokes_previous_proof(self):
         repo = self.independent_policy_repo()
@@ -594,7 +594,11 @@ class CommunicationTests(unittest.TestCase):
         self.git(repo, 'switch', 'main')
         api = repo / 'api.py'
         api.write_text('def lookup(identifier):\n    return identifier\n')
-        self.git(repo, 'add', 'api.py')
+        legacy = repo / 'legacy.ps1'
+        previous = 'function Lookup($Identifier) {}\n'.encode('utf-16')
+        advanced = 'function Lookup($Identifier, $Required) {}\n'.encode('utf-16')
+        legacy.write_bytes(previous)
+        self.git(repo, 'add', 'api.py', 'legacy.ps1')
         self.git(repo, 'commit', '-qm', 'original signature')
         self.git(repo, 'switch', 'feature')
         self.git(repo, 'merge', '--no-edit', 'main')
@@ -603,7 +607,8 @@ class CommunicationTests(unittest.TestCase):
         self.git(repo, 'commit', '-qm', 'call the original API')
         self.git(repo, 'switch', 'main')
         api.write_text('def lookup(identifier, required):\n    return identifier, required\n')
-        self.git(repo, 'commit', '-qam', 'advance the base signature')
+        legacy.write_bytes(advanced)
+        self.git(repo, 'commit', '-qam', 'advance the base signatures')
         self.git(repo, 'switch', 'feature')
         base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
         self.assertEqual((len(base), len(head)), (64, 64))
@@ -615,6 +620,8 @@ class CommunicationTests(unittest.TestCase):
                 self.assertIn('+result = lookup("value")', (scratch / 'review.patch').read_text())
                 self.assertIn('+def lookup(identifier, required):', (scratch / 'base.patch').read_text())
                 self.assertIn('def lookup(identifier):', (scratch / 'checkout/api.py').read_text())
+                self.assertEqual((scratch / 'merge-base-files/legacy.ps1').read_bytes(), previous)
+                self.assertEqual((scratch / 'target-base-files/legacy.ps1').read_bytes(), advanced)
                 raise RuntimeError('reviewer reached')
             return run_git(args, **kwargs)
 

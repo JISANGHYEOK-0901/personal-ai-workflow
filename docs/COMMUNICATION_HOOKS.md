@@ -77,7 +77,7 @@ PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft�
 
 새 머지 훅은 대상 base의 `.workflow-pr.json`에 `"require_independent_review": true`가 있으면 독립 리뷰 증거를 요구한다. 정책을 base 커밋에서 읽으므로 검토할 head가 파일을 변경해도 현재 머지 조건은 해당 base를 따른다. 정책을 적용하는 환경에서는 최종 커밋 검토 명령에 `--independent-review`를 추가한다. 증표가 없거나 만료됐을 때는 조회한 PR의 base 정책을 확인할 수 있으면 복구 명령에 이 옵션을 표시한다.
 
-실제 작업공간에 새 런타임을 설치한 뒤 `--check`와 사용하는 도구의 훅 실행을 확인한다. 대상 base의 GitHub 브랜치 보호에서 필수 CI, 최신 base 반영, 관리자 적용을 확인한다. [도구에서 활성화 확인](#도구에서-활성화-확인)을 따른 다음 대상 base에 다음 정책을 반영한다.
+실제 작업공간에 새 런타임을 설치한 뒤 `--check`와 사용하는 도구의 훅 실행을 확인한다. 독립 리뷰 정책의 도입 요건은 GitHub의 클래식 브랜치 보호다. 대상 base에 필수 CI, 최신 base 반영, 관리자 적용을 설정하고 새 훅에서 해당 보호를 확인한다. [도구에서 활성화 확인](#도구에서-활성화-확인)을 따른 다음 대상 base에 다음 정책을 반영한다.
 
 ```json
 {"require_independent_review": true}
@@ -89,7 +89,7 @@ PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft�
 
 리뷰어는 해당 CLI의 기존 로그인과 해당 도구에 내보낸 인증 환경을 사용한다. Claude Code는 `ANTHROPIC_API_KEY`와 공급자 선택 환경도 이어받는다. Codex의 비대화형 API 키는 `CODEX_API_KEY`를 사용한다. 별도 Responses API 호환 엔드포인트가 필요하면 `CODEX_API_KEY`와 `WORKFLOW_CODEX_REVIEW_BASE_URL`을 리뷰 명령 환경에 설정하고, 모델은 `WORKFLOW_CODEX_REVIEW_MODEL`로 지정할 수 있다. Codex는 사용자 도구 설정과 룰을 읽지 않으며 읽기 전용 셸 명령에 CLI 인증 환경을 전달하지 않는다. [Claude Code 환경 변수](https://code.claude.com/docs/en/env-vars), [Codex 비대화형 인증](https://developers.openai.com/codex/noninteractive)
 
-저장소의 Git 객체 형식을 사용하고 상속된 Git 설정과 훅 없이 merge base와 양쪽 tip을 얕게 가져온다. checkout 전에 두 diff를 만들어 변경된 텍스트가 경로별 diff 속성에 의해 가려지지 않게 한다. Git에 기록된 인코딩과 바이트로 head 파일을 배치한 뒤 Git 메타데이터를 제거한다. 심볼릭 링크는 기록된 대상 문자열로 전달한다. 양쪽 diff에 바뀐 서브모듈 참조가 있으면 해당 소스의 검증 근거가 부족하므로 미검증으로 처리한다. 리뷰 제한은 180초다. 완료 세션이 정확한 SHA의 보고서를 반환하면 원문을 소유자만 읽고 쓸 수 있는 `ai-input/hook-state/pr-review-<세션 ID>.json`에 보관하고 해시를 증표에 연결한다. 같은 저장소·base/head의 독립 리뷰를 시작하면 통과까지 검토 증표를 요구하는 PR 경계가 대기하며, 실패 상태의 원문도 로컬에 남는다. 일반 push의 검토 증표 적용은 위의 PR 의도 규칙을 따른다.
+저장소의 Git 객체 형식을 사용하고 상속된 Git 설정과 훅 없이 merge base와 양쪽 tip을 얕게 가져온다. checkout 전에 두 diff를 만들어 변경된 텍스트가 경로별 diff 속성에 의해 가려지지 않게 한다. Git이 바이너리로 분류한 변경은 비교할 merge base와 대상 base의 원본 바이트도 전달한다. Git에 기록된 인코딩과 바이트로 head 파일을 배치한 뒤 Git 메타데이터를 제거한다. 심볼릭 링크는 기록된 대상 문자열로 전달한다. 양쪽 diff에 바뀐 서브모듈 참조가 있으면 해당 소스의 검증 근거가 부족하므로 미검증으로 처리한다. 리뷰 제한은 180초다. 완료 세션이 정확한 SHA의 보고서를 반환하면 원문을 소유자만 읽고 쓸 수 있는 `ai-input/hook-state/pr-review-<세션 ID>.json`에 보관하고 해시를 증표에 연결한다. 같은 저장소·base/head의 독립 리뷰를 시작하면 통과까지 검토 증표를 요구하는 PR 경계가 대기하며, 실패 상태의 원문도 로컬에 남는다. 일반 push의 검토 증표 적용은 위의 PR 의도 규칙을 따른다.
 
 머지 직전 증거가 누락되었거나 변경됐거나 저장소와 SHA가 다르면 거부한다. 독립 리뷰가 필요한 직접 머지는 현재 SHA를 대상으로 즉시 실행한다. `--auto` 또는 GitHub merge queue는 나중에 바뀐 base를 결합할 수 있으므로 해당 경로에서는 차단한다. PR의 base/head, 큐, 최신 base를 요구하는 관리자 적용 브랜치 보호, head의 통합 CI 상태를 한 번의 GitHub 조회에서 확인한 뒤 증표와 원문을 다시 확인한다. PR 경계의 Git·GitHub 조회와 검토 상태 확인은 공유된 12초 제한 안에서 수행한다. [GitHub CLI 머지 동작](https://cli.github.com/manual/gh_pr_merge) 정책과 검토 상태를 확인할 때는 원본 Git 객체를 사용한다. 독립 리뷰 상태는 일반 증표와 별도로 설치 작업공간에 저장하며 저장소 식별값과 base/head SHA로 찾는다. 다른 브랜치의 증표나 일반 갱신은 상태와 만료 시각에 영향을 주지 않는다. 만료한 리뷰는 현재 기선에서 다시 받아야 한다. 새 독립 리뷰가 시작되면 늦게 끝난 이전 리뷰가 새 시도를 덮어쓰지 않는다. GitHub의 브랜치 보호와 필수 CI는 별도로 적용된다. 이 증거로 확인하는 독립성은 별도 도구 세션이며, GitHub의 사람 승인이나 운영체제 수준의 검토 격리는 해당 환경의 정책에 따른다.
 

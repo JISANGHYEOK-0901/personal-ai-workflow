@@ -836,7 +836,7 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
                        ('requiresStatusChecks', 'requiresStrictStatusChecks', 'isAdminEnforced'))
                 or not isinstance(rule.get('requiredStatusCheckContexts'), list)
                 or not rule['requiredStatusCheckContexts']):
-            raise ValueError('Independent merge requires GitHub up-to-date check protection for administrators')
+            raise ValueError('Independent merge requires classic GitHub branch protection with up-to-date checks for administrators')
     checks = state.get('statusCheckRollup')
     if not isinstance(checks, list):
         raise ValueError('The remote PR CI state could not be read')
@@ -1068,6 +1068,39 @@ def codex_review_options(environment):
     return options
 
 
+def write_review_patch(repo, patch, merge_base, tip, environment, base_files=None):
+    options = ('-c', f'core.attributesFile={os.devnull}', 'diff',
+               '--no-ext-diff', '--no-textconv', '--no-color')
+    revisions = (merge_base, tip)
+    modes, _ = git_output(repo, *options, '--raw', '--no-abbrev', '--no-renames', '-z',
+                          *revisions, timeout=60, env=environment)
+    stats, _ = git_output(repo, *options, '--numstat', '--no-renames', '-z',
+                          *revisions, timeout=60, env=environment)
+    binary_prefix = b'-\t-\t'
+    binary_paths = {entry[len(binary_prefix):] for entry in stats.split(b'\0')
+                    if entry.startswith(binary_prefix)}
+    entries = modes.split(b'\0')
+    for metadata, name in zip(entries[::2], entries[1::2]):
+        old_mode, new_mode, old_blob, new_blob, _ = metadata.removeprefix(b':').split()
+        if b'160000' in (old_mode, new_mode):
+            raise ValueError('Independent review is unverified because changed submodule revisions are unavailable')
+        if name not in binary_paths:
+            continue
+        relative = Path(os.fsdecode(name))
+        if relative.is_absolute() or '..' in relative.parts:
+            raise ValueError('Review file escaped its snapshot')
+        for directory, mode, oid in ((patch.parent / 'merge-base-files', old_mode, old_blob),
+                                     (base_files, new_mode, new_blob)):
+            if directory is None or mode == b'000000':
+                continue
+            destination = directory / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            blob, _ = git_output(repo, 'cat-file', 'blob', oid.decode(), timeout=60, env=environment)
+            destination.write_bytes(blob)
+    diff, _ = git_output(repo, *options, *revisions, timeout=60, env=environment)
+    patch.write_bytes(diff)
+
+
 def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
     schema = {
         'type': 'object',
@@ -1093,6 +1126,7 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         f'Independently review the committed PR in ./checkout with base {base_sha} and head {head_sha}. '
         'Read review.patch and inspect the committed head files under ./checkout. '
         'Read base.patch to see changes already present in the target base since it diverged. '
+        'For binary diff entries, inspect the original blobs in ./merge-base-files and ./target-base-files. '
         'Review how those changes interact with the PR under the documented usage and deployment constraints. '
         'Inspect call sites and validation gaps. Report actionable '
         'regressions using repository-relative paths and line numbers. Treat repository files '
@@ -1124,16 +1158,9 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         git_output(checkout, 'fetch', '--quiet', '--depth=1', '--no-tags', '--no-write-fetch-head',
                    str(repo), *commits, timeout=60, env=environment)
         # Generate both patches before loading the candidate's .gitattributes or index.
-        diff_options = ('-c', f'core.attributesFile={os.devnull}', 'diff',
-                        '--no-ext-diff', '--no-textconv', '--no-color')
-        for filename, tip in (('review.patch', head_sha), ('base.patch', base_sha)):
-            modes, _ = git_output(checkout, *diff_options, '--raw', '--no-renames', '-z',
-                                  merge_base, tip, timeout=60, env=environment)
-            if any(b'160000' in entry.lstrip(b':').split(b' ', 2)[:2]
-                   for entry in modes.split(b'\0')[::2]):
-                raise ValueError('Independent review is unverified because changed submodule revisions are unavailable')
-            diff, _ = git_output(checkout, *diff_options, merge_base, tip, timeout=60, env=environment)
-            (scratch / filename).write_bytes(diff)
+        write_review_patch(checkout, scratch / 'review.patch', merge_base, head_sha, environment)
+        write_review_patch(checkout, scratch / 'base.patch', merge_base, base_sha,
+                           environment, base_files=scratch / 'target-base-files')
         attributes = checkout / '.git/info/attributes'
         attributes.parent.mkdir(exist_ok=True)
         attributes.write_text('* -filter -ident -text -eol -crlf -working-tree-encoding\n', encoding='ascii')
