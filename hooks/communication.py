@@ -1414,13 +1414,39 @@ def load_review_receipt(root, repo):
         ).fetchone()
 
 
+def merge_recovery_requires_review(repo, boundary):
+    number, head = boundary.get('pr_number'), boundary.get('match_head')
+    if (not isinstance(number, str) or not number.isdigit() or not isinstance(head, str)
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head)):
+        return False
+    try:
+        state = remote_pr_state(repo, number)
+        base = state.get('baseRefOid')
+        if (state.get('number') != int(number) or state.get('headRefOid') != head
+                or not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', base)):
+            return False
+        remotes = named_remotes(repo)
+        override = boundary.get('remote_repo')
+        identity = pr_repository_identity(state, number)
+        if isinstance(override, str):
+            if gh_repo_identity(override) != identity:
+                return False
+        elif identity not in {remote_identity(repo, remote) for remote in remotes}:
+            return False
+        return independent_review_required(repo, base)
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 def check_review(root, cwd, boundary, reviewer=None):
-    requires_independent_review = False
+    requires_independent_review = None
+    merge_lookup_allowed = False
     try:
         check_command_context(boundary)
         repo = resolve_repo(root, cwd, boundary.get('repo'))
         # Explain a different --repo target before asking for this checkout's receipt.
         check_repo_override(repo, boundary, named_remotes(repo))
+        merge_lookup_allowed = boundary['action'] == 'merge'
         if boundary['action'] == 'create' and not boundary.get('base'):
             raise ValueError('gh pr create must include an explicit --base')
         if boundary['action'] == 'create' and not boundary.get('head'):
@@ -1478,6 +1504,8 @@ def check_review(root, cwd, boundary, reviewer=None):
         try:
             repo = resolve_repo(root, cwd, boundary.get('repo'))
             command = review_record_command(root, repo)
+            if requires_independent_review is None and merge_lookup_allowed:
+                requires_independent_review = merge_recovery_requires_review(repo, boundary)
         except (OSError, TypeError, ValueError, subprocess.SubprocessError):
             command = review_record_command(root, repository_candidate(cwd, boundary.get('repo')))
         if requires_independent_review:

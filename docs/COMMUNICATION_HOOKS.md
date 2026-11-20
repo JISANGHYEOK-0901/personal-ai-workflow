@@ -75,7 +75,15 @@ PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft�
 
 ### 독립 리뷰 증거
 
-대상 base의 `.workflow-pr.json`에 `"require_independent_review": true`가 있으면 머지 훅이 독립 리뷰 증거를 요구한다. 정책을 base 커밋에서 읽으므로 검토할 head가 파일을 변경해도 현재 머지 조건은 해당 base를 따른다. 이 저장소의 정책을 채택하는 환경에서는 최종 커밋 검토 명령에 `--independent-review`를 추가한다. 런타임 교체를 검토하는 동안에도 이 저장소 정본의 `python3 hooks/communication.py`로 증표를 기록할 수 있다.
+새 머지 훅은 대상 base의 `.workflow-pr.json`에 `"require_independent_review": true`가 있으면 독립 리뷰 증거를 요구한다. 정책을 base 커밋에서 읽으므로 검토할 head가 파일을 변경해도 현재 머지 조건은 해당 base를 따른다. 정책을 적용하는 환경에서는 최종 커밋 검토 명령에 `--independent-review`를 추가한다. 증표가 없거나 만료됐을 때는 조회한 PR의 base 정책을 확인할 수 있으면 복구 명령에 이 옵션을 표시한다.
+
+실제 작업공간에 새 런타임을 설치한 뒤 `--check`와 사용하는 도구의 훅 실행을 확인한다. [도구에서 활성화 확인](#도구에서-활성화-확인)을 따른 다음 대상 base에 다음 정책을 반영한다.
+
+```json
+{"require_independent_review": true}
+```
+
+현재 저장소는 기존 신뢰 훅을 쓰고, 새 필수 정책은 격리 설치와 테스트 base에서 검증한다. 정본의 `python3 hooks/communication.py`로 증표를 기록하는 경로도 사용할 수 있다. 운영 강제 상태는 해당 도구의 설치된 런타임 실행과 대상 base 정책을 함께 확인한다.
 
 명시적으로 실행한 독립 리뷰는 base/head 커밋만 가져온 임시 checkout을 대상으로 구현과 같은 AI의 별도 읽기 전용 세션을 한 번 실행한다. 두 CLI가 설치돼 있으면 `--reviewer claude` 또는 `--reviewer codex`로 현재 도구를 지정한다. 하나가 설치돼 있으면 그 CLI를 선택한다. 세션은 명령이 자동으로 시작한다. 같은 SHA의 유효한 보고서를 가지고 있으면 일반 증표를 갱신해 사용한다.
 

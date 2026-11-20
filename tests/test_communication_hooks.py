@@ -339,6 +339,19 @@ class CommunicationTests(unittest.TestCase):
         self.assertIn('An independent review is required', output['permissionDecisionReason'])
         self.assertIn('--independent-review', output['permissionDecisionReason'])
 
+    def test_merge_recovery_uses_the_target_policy_for_missing_and_stale_receipts(self):
+        repo = self.independent_policy_repo()
+        target = {'base': self.git(repo, 'rev-parse', 'main'), 'head': self.git(repo, 'rev-parse', 'HEAD')}
+        missing = self.merge_with_review(repo, target)
+        self.assertIn('No review receipt', missing['permissionDecisionReason'])
+        self.assertIn('--independent-review --reviewer codex', missing['permissionDecisionReason'])
+
+        HOOK.record_review(self.root, repo, 'main', True, True, True)
+        with patch.object(HOOK.time, 'time', return_value=HOOK.time.time() + HOOK.REVIEW_MAX_AGE + 1):
+            stale = self.merge_with_review(repo, target)
+        self.assertIn('older than 24 hours', stale['permissionDecisionReason'])
+        self.assertIn('--independent-review --reviewer codex', stale['permissionDecisionReason'])
+
     def test_merge_uses_captured_review_and_rejects_changed_report(self):
         repo = self.independent_policy_repo()
         session = 'f054c0c1-965e-4b46-8394-cb598df7f573'
