@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import shutil
 from pathlib import Path
 import sqlite3
@@ -388,7 +389,11 @@ class CommunicationTests(unittest.TestCase):
             receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
 
         def replace_receipt():
-            HOOK.record_review(self.root, repo, 'main', True, True, True)
+            next_session = '9ae0e0a9-321c-42f2-a4d0-117a5d8a79d8'
+            review = {'verdict': 'blocked', 'findings': []}
+            with patch.object(HOOK, 'run_independent_review', return_value=(next_session, '{}', review)):
+                with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                    HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
 
         output = self.merge_with_review(repo, receipt, during_lookup=replace_receipt)
         self.assertEqual(output.get('permissionDecision'), 'deny')
@@ -414,6 +419,53 @@ class CommunicationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
                 HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
         self.assertTrue(HOOK.independent_review_path(self.root, session).is_file())
+
+    def test_independent_checkout_keeps_host_git_programs_inactive(self):
+        repo = self.feature_repo()
+        (repo / '.gitattributes').write_text('app.txt filter=proof-probe\n')
+        self.git(repo, 'add', '.gitattributes')
+        self.git(repo, 'commit', '-qm', 'declare filter on reviewed paths')
+        base = self.git(repo, 'rev-parse', 'main').strip()
+        head = self.git(repo, 'rev-parse', 'HEAD').strip()
+        config = self.root / 'review-probe.config'
+        hooks = self.root / 'test-hooks'
+        hooks.mkdir()
+        marker = self.root / 'git-program-called'
+        filter_command = self.root / 'probe-filter'
+        filter_command.write_text('#!/bin/sh\nprintf filter >> "$WORKFLOW_TEST_PROBE"\ncat\n')
+        checkout_hook = hooks / 'post-checkout'
+        checkout_hook.write_text('#!/bin/sh\nprintf hook >> "$WORKFLOW_TEST_PROBE"\n')
+        checkout_hook.chmod(0o700)
+        self.git(repo, 'config', '--file', str(config), 'core.hooksPath', str(hooks))
+        self.git(repo, 'config', '--file', str(config), 'filter.proof-probe.smudge',
+                 'sh ' + shlex.quote(str(filter_command)))
+        run_git = subprocess.run
+
+        def stop_at_reviewer(args, **kwargs):
+            if args[0] == 'codex':
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(config),
+                                     'WORKFLOW_TEST_PROBE': str(marker)}), patch.object(
+                                         HOOK.subprocess, 'run', side_effect=stop_at_reviewer):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+        self.assertFalse(marker.exists())
+
+    def test_refresh_preserves_passing_review_and_its_original_age(self):
+        repo = self.independent_policy_repo()
+        session = 'dc71fc91-10c3-43f4-9cc4-cfc3e0b77c46'
+        report = {'verdict': 'pass', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        original = HOOK.load_review_receipt(self.root, repo.resolve())
+        with patch.object(HOOK.time, 'time', return_value=original[5] + 60):
+            HOOK.record_review(self.root, repo, 'main', True, True, True)
+        current = HOOK.load_review_receipt(self.root, repo.resolve())
+        self.assertEqual(current[5], original[5])
+        self.assertEqual(current[-1], original[-1])
+        self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
 
     def test_independent_report_requires_a_completed_session_and_matching_shas(self):
         base, head = 'a' * 40, 'b' * 40
