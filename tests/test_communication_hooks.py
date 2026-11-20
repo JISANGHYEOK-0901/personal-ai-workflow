@@ -312,7 +312,7 @@ class CommunicationTests(unittest.TestCase):
         self.git(repo, 'merge', '--no-edit', 'main')
         return repo
 
-    def merge_with_review(self, repo, receipt, during_lookup=None):
+    def merge_with_review(self, repo, receipt, during_lookup=None, queue=False, options=''):
         remote = {
             'number': 17, 'state': 'OPEN', 'isDraft': False, 'baseRefName': 'main',
             'baseRefOid': receipt['base'], 'headRefName': 'feature', 'headRefOid': receipt['head'],
@@ -324,9 +324,10 @@ class CommunicationTests(unittest.TestCase):
                 during_lookup()
             return remote
 
-        with patch.object(HOOK, 'remote_pr_state', side_effect=lookup):
+        with patch.object(HOOK, 'remote_pr_state', side_effect=lookup), patch.object(
+                HOOK, 'remote_merge_queue', return_value=queue):
             return self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
-                'command': 'gh pr merge 17 --merge --match-head-commit ' + receipt['head'],
+                'command': f"gh pr merge 17 --merge --match-head-commit {receipt['head']} {options}",
             }).get('hookSpecificOutput', {})
 
     def test_merge_policy_comes_from_base_even_if_head_removes_it(self):
@@ -379,6 +380,21 @@ class CommunicationTests(unittest.TestCase):
         self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
         evidence.write_text('{}')
         self.assertIn('report has changed', self.merge_with_review(repo, receipt)['permissionDecisionReason'])
+
+    def test_independent_merge_denies_auto_and_required_queue(self):
+        repo = self.independent_policy_repo()
+        session = 'eb15766a-c324-48c1-a3aa-85f2114f7444'
+        result = (session, '{}', {'verdict': 'pass', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=result):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+
+        self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+        auto = self.merge_with_review(repo, receipt, options='--auto')
+        self.assertEqual(auto['permissionDecision'], 'deny')
+        self.assertIn('remove --auto', auto['permissionDecisionReason'])
+        queue = self.merge_with_review(repo, receipt, queue=True)
+        self.assertEqual(queue['permissionDecision'], 'deny')
+        self.assertIn('deferred GitHub merge queue', queue['permissionDecisionReason'])
 
     def test_new_blocking_independent_review_revokes_previous_proof(self):
         repo = self.independent_policy_repo()
@@ -532,6 +548,31 @@ class CommunicationTests(unittest.TestCase):
             return run_git(args, **kwargs)
 
         with patch.object(HOOK.subprocess, 'run', side_effect=observe_patch):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+
+    def test_unchanged_call_site_is_readable_in_committed_encoding(self):
+        repo = self.feature_repo()
+        self.git(repo, 'switch', 'main')
+        original = 'result = lookup("existing")\n'
+        (repo / '.gitattributes').write_text('caller.py working-tree-encoding=UTF-16LE\n')
+        (repo / 'caller.py').write_bytes(original.encode('utf-16le'))
+        self.git(repo, 'add', '.gitattributes', 'caller.py')
+        self.git(repo, 'commit', '-qm', 'record a caller and its checkout encoding')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        run_git = subprocess.run
+
+        def observe_snapshot(args, **kwargs):
+            if args[0] == 'codex':
+                scratch = kwargs['cwd']
+                self.assertNotIn('caller.py', (scratch / 'review.patch').read_text())
+                self.assertEqual((scratch / 'checkout/caller.py').read_bytes(), original.encode('utf-8'))
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.object(HOOK.subprocess, 'run', side_effect=observe_snapshot):
             with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
                 HOOK.run_independent_review(repo, base, head)
 

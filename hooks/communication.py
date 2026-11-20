@@ -523,7 +523,7 @@ def gh_boundary(words, repo=None):
         return None
     action = words.pop(0)
     boundary = {'action': action, 'repo': repo, 'base': None, 'head': None,
-                'remote_repo': False, 'pr_number': None, 'match_head': None, 'error': None}
+                'remote_repo': False, 'pr_number': None, 'match_head': None, 'auto': False, 'error': None}
     value_options = ({'--base': 'base', '-B': 'base', '--head': 'head', '-H': 'head',
                       '--title': None, '-t': None, '--body': None, '-b': None,
                       '--body-file': None, '-F': None, '--template': None, '-T': None,
@@ -563,7 +563,8 @@ def gh_boundary(words, repo=None):
         elif word in {'--admin', '--delete-branch'} or (action == 'merge' and word == '-d'):
             error = 'Merge without admin bypass or branch deletion; use separate merged-PR cleanup'
         elif word in boolean_options:
-            pass
+            if word == '--auto':
+                boundary['auto'] = True
         elif word.startswith('-'):
             error = 'Unsupported PR option; use documented explicit create/merge options'
         else:
@@ -827,6 +828,28 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
     return state
 
 
+def remote_merge_queue(repo, state):
+    host, owner, name = pr_repository_identity(state, state['number']).split('/')
+    query = ('query($owner:String!, $name:String!, $branch:String!) { '
+             'repository(owner:$owner, name:$name) { mergeQueue(branch:$branch) { id } } }')
+    environment = dict(os.environ, GH_PROMPT_DISABLED='1')
+    result = subprocess.run(
+        ['gh', 'api', 'graphql', '--hostname', host, '-f', 'query=' + query,
+         '-f', 'owner=' + owner, '-f', 'name=' + name, '-f', 'branch=' + state['baseRefName']],
+        cwd=repo, env=environment, capture_output=True, timeout=8, check=False,
+    )
+    if result.returncode:
+        raise ValueError('GitHub merge queue could not be verified')
+    try:
+        payload = json.loads(result.stdout)
+        queue = payload['data']['repository']['mergeQueue']
+        if payload.get('errors') or (queue is not None and not isinstance(queue.get('id'), str)):
+            raise ValueError('Invalid queue response')
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError('GitHub merge queue returned an invalid response') from exc
+    return queue is not None
+
+
 def resolve_repo(root, cwd, hint=None):
     root = root.resolve()
     candidate = repository_candidate(cwd, hint)
@@ -1044,15 +1067,14 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         for filename, tip in (('review.patch', head_sha), ('base.patch', base_sha)):
             diff, _ = git_output(checkout, *diff_options, merge_base, tip, timeout=60, env=environment)
             (scratch / filename).write_bytes(diff)
+        attributes = checkout / '.git/info/attributes'
+        attributes.parent.mkdir(exist_ok=True)
+        attributes.write_text('* -filter -ident -text -eol -crlf -working-tree-encoding\n', encoding='ascii')
         git_output(checkout, '-c', f'core.hooksPath={scratch / "disabled-hooks"}',
-                   '-c', f'core.attributesFile={os.devnull}', 'checkout', '--quiet',
-                   '--detach', head_sha, timeout=60, env=environment)
+                   '-c', f'core.attributesFile={os.devnull}', '-c', 'core.symlinks=false',
+                   '-c', 'core.autocrlf=false', 'checkout', '--quiet', '--detach',
+                   head_sha, timeout=60, env=environment)
         shutil.rmtree(checkout / '.git')
-        for path in checkout.rglob('*'):
-            if path.is_symlink():
-                target = os.readlink(path)
-                path.unlink()
-                path.write_bytes(os.fsencode(target))
         report_path = scratch / 'report.json'
         auth = claude_auth if reviewer == 'claude' else codex_auth
         environment.update({name: inherited[name] for name in auth if name in inherited})
@@ -1500,6 +1522,8 @@ def check_review(root, cwd, boundary, reviewer=None):
         requires_independent_review = (review_proof is not None or
                                        (boundary['action'] == 'merge' and independent_review_required(repo, base_sha)))
         if requires_independent_review:
+            if boundary['action'] == 'merge' and boundary.get('auto'):
+                raise ValueError('Independent review requires an immediate merge; remove --auto')
             verify_independent_review(root, review_proof, independent_updated,
                                       base_sha, head_sha, recorded_identity)
         if boundary['action'] == 'create':
@@ -1514,7 +1538,9 @@ def check_review(root, cwd, boundary, reviewer=None):
         if boundary['action'] == 'push':
             check_push(repo, boundary, head_sha, recorded_identity)
         if boundary['action'] == 'merge':
-            check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
+            state = check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
+            if requires_independent_review and remote_merge_queue(repo, state):
+                raise ValueError('Independent review cannot authorize a deferred GitHub merge queue')
         if load_review_receipt(root, repo) != row:
             raise ValueError('Review receipt changed during the PR boundary check')
         if requires_independent_review:
