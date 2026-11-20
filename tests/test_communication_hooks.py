@@ -301,6 +301,93 @@ class CommunicationTests(unittest.TestCase):
         self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('unsuccessful CI', blocked['hookSpecificOutput']['permissionDecisionReason'])
 
+    def independent_policy_repo(self):
+        repo = self.feature_repo()
+        self.git(repo, 'switch', 'main')
+        (repo / '.workflow-pr.json').write_text('{"require_independent_review": true}\n')
+        self.git(repo, 'add', '.workflow-pr.json')
+        self.git(repo, 'commit', '-qm', 'require independent review')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        return repo
+
+    def merge_with_review(self, repo, receipt):
+        remote = {
+            'number': 17, 'state': 'OPEN', 'isDraft': False, 'baseRefName': 'main',
+            'baseRefOid': receipt['base'], 'headRefName': 'feature', 'headRefOid': receipt['head'],
+            'mergeable': 'MERGEABLE', 'url': 'https://github.com/audit/sample/pull/17',
+            'statusCheckRollup': [{'status': 'COMPLETED', 'conclusion': 'SUCCESS'}],
+        }
+        with patch.object(HOOK, 'remote_pr_state', return_value=remote):
+            return self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                'command': 'gh pr merge 17 --merge --match-head-commit ' + receipt['head'],
+            }).get('hookSpecificOutput', {})
+
+    def test_merge_policy_comes_from_base_even_if_head_removes_it(self):
+        repo = self.independent_policy_repo()
+        self.git(repo, 'rm', '.workflow-pr.json')
+        self.git(repo, 'commit', '-qm', 'remove PR policy from head')
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        output = self.merge_with_review(repo, receipt)
+        self.assertEqual(output['permissionDecision'], 'deny')
+        self.assertIn('An independent review is required', output['permissionDecisionReason'])
+        self.assertIn('--independent-review', output['permissionDecisionReason'])
+
+    def test_merge_uses_captured_review_and_rejects_changed_report(self):
+        repo = self.independent_policy_repo()
+        session = 'f054c0c1-965e-4b46-8394-cb598df7f573'
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{"raw":"review"}', [])):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        evidence = Path(receipt['review_path'])
+        report = json.loads(evidence.read_text())
+        self.assertEqual(report['raw_report'], '{"raw":"review"}')
+        self.assertEqual(report['head_sha'], receipt['head'])
+        self.assertEqual(receipt['review_session'], session)
+        self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+        evidence.write_text('{}')
+        self.assertIn('report has changed', self.merge_with_review(repo, receipt)['permissionDecisionReason'])
+
+    def test_new_blocking_independent_review_revokes_previous_proof(self):
+        repo = self.independent_policy_repo()
+        previous = '34810798-6d2c-481e-973c-c533846f4069'
+        with patch.object(HOOK, 'run_independent_review', return_value=(previous, '{"initial":"pass"}', [])):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        next_session = '4a00fc93-08d7-4905-b0ef-0ba11cc4c2c0'
+        findings = [{'priority': 'major', 'description': 'Behavior regressed.'}]
+        with patch.object(HOOK, 'run_independent_review',
+                          return_value=(next_session, '{"new":"finding"}', findings)):
+            with self.assertRaisesRegex(ValueError, 'MAJOR or BLOCKER'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.assertTrue(HOOK.independent_review_path(self.root, next_session).is_file())
+        self.assertEqual(self.merge_with_review(repo, receipt)['permissionDecision'], 'deny')
+
+    def test_late_independent_report_cannot_replace_a_newer_receipt(self):
+        repo = self.independent_policy_repo()
+        session = '8c1aa752-8afb-4f4e-9fd4-d98f5ceb0c0f'
+
+        def run_then_replace(*args):
+            HOOK.record_review(self.root, repo, 'main', True, True, True)
+            return session, '{"late":"pass"}', []
+
+        with patch.object(HOOK, 'run_independent_review', side_effect=run_then_replace):
+            with self.assertRaisesRegex(ValueError, 'newer receipt'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        receipt = {'base': self.git(repo, 'rev-parse', 'main').strip(),
+                   'head': self.git(repo, 'rev-parse', 'HEAD').strip()}
+        self.assertEqual(self.merge_with_review(repo, receipt)['permissionDecision'], 'deny')
+
+    def test_independent_report_requires_a_completed_session_and_matching_shas(self):
+        base, head = 'a' * 40, 'b' * 40
+        session = '1781d06f-4d89-4c14-ba15-ace8f3c61898'
+        started = json.dumps({'type': 'thread.started', 'thread_id': session})
+        complete = started + '\n' + json.dumps({'type': 'turn.completed'})
+        report = json.dumps({'base_sha': base, 'head_sha': head, 'summary': 'Diff reviewed.', 'findings': []})
+        self.assertEqual(HOOK.parse_independent_review(complete, report, base, head), (session, []))
+        with self.assertRaisesRegex(ValueError, 'completed independent review session'):
+            HOOK.parse_independent_review(started, report, base, head)
+        with self.assertRaisesRegex(ValueError, 'base and HEAD'):
+            HOOK.parse_independent_review(complete, report, head, base)
+
     def test_merge_requires_completed_known_ci_results(self):
         repo = self.feature_repo()
         receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)

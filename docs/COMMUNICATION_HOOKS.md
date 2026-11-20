@@ -73,6 +73,14 @@ gh pr merge 123 --merge --match-head-commit <reviewed-full-head-sha>
 
 PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft·mergeable 상태, PR 번호, 저장소 식별값, 원격 base 브랜치와 base/head SHA, 현재 CI rollup을 확인한다. 원격 base/head가 증표와 다르거나 CI 목록이 비어 있거나 pending·실패·미확인이면 merge를 거부한다. StatusContext는 `SUCCESS`만 허용하며 `EXPECTED`도 미완료로 처리한다. CheckRun은 `COMPLETED`와 `SUCCESS/NEUTRAL/SKIPPED` 결론이 모두 있어야 한다. 프로젝트가 요구하는 개별 체크의 이름과 발행 앱은 서버 보호 설정에서 확인한다. 조회는 읽기 전용이지만 GitHub 인증·네트워크가 필요하고 확인할 수 없는 해당 PR 명령은 fail closed다. `--admin` 우회와 `--delete-branch` 동시 삭제는 허용하지 않으며 삭제는 아래 정리 경로로 분리한다.
 
+### 독립 리뷰 증거
+
+대상 base의 `.workflow-pr.json`에 `"require_independent_review": true`가 있으면 머지 훅이 독립 리뷰 증거를 요구한다. 정책을 base 커밋에서 읽으므로 검토할 head가 파일을 변경해도 현재 머지 조건은 해당 base를 따른다. 이 저장소의 정책을 채택하는 환경에서는 최종 커밋 검토 명령에 `--independent-review`를 추가한다. 런타임 교체를 검토하는 동안에도 이 저장소 정본의 `python3 hooks/communication.py`로 증표를 기록할 수 있다.
+
+명시적으로 실행한 독립 리뷰는 base/head 커밋만 가져온 임시 checkout에서 별도 읽기 전용 Codex CLI 세션을 한 번 실행한다. 실행 제한은 180초다. 세션이 완료되고 정확한 SHA의 보고서를 반환하면 원문을 `ai-input/hook-state/pr-review-<세션 ID>.json`에 보관한다. 증표에는 보고서 해시가 포함된다. 새 리뷰의 MAJOR·BLOCKER는 해당 기선의 머지 증표를 막으며 보고서는 로컬에 남는다.
+
+머지 직전 증거가 누락되었거나 변경됐거나 저장소와 SHA가 다르면 거부한다. 실행 중인 리뷰 사이에 새 증표가 기록되면 늦게 끝난 이전 리뷰는 그 증표를 덮어쓰지 않는다. GitHub의 브랜치 보호와 필수 CI는 별도로 적용된다. 이 증거로 확인하는 독립성은 별도 도구 세션이며, GitHub의 사람 승인이나 운영체제 수준의 검토 격리는 해당 환경의 정책에 따른다.
+
 ### 머지 후 정리 증표
 
 머지 뒤에는 base에 변경이 포함되므로 새 PR diff를 요구하지 않는다. 실제 PR의 MERGED 상태, 원래 head 브랜치·SHA, 같은 저장소의 remote, merge commit이 fetch한 base에 포함됐는지를 확인해 별도 증표를 기록한다. fork PR과 base·상시 브랜치 삭제는 지원하지 않는다. 다른 PR·후속 커밋·worktree 사용 여부 등 `pr-lifecycle`의 보존 조건도 계속 적용한다.
@@ -134,7 +142,7 @@ python3 scripts/install_communication_hooks.py --target /path/to/workspace --rem
 
 ## 상태·비용·실패 처리
 
-별도 모델 호출이나 대화 원문 수집은 없다. 일반 전달 이벤트는 네트워크를 사용하지 않는다. PR 생성은 선택된 저장소와 원격 브랜치를, merge·정리 증표 기록·삭제 검사는 GitHub PR 상태를 읽는다. 로컬 SQLite에는 반복 억제용 세션·디렉터리 해시와 단계 상태, 위 검토 증표 및 PR 번호·Git ref/SHA·원격 식별 해시에 묶인 정리 증표를 보존한다. 명령·프롬프트·답변·인증값·실제 경로는 기록하지 않는다. 14일 지난 세션 상태는 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
+일반 전달 이벤트는 네트워크나 모델 호출을 사용하지 않는다. PR 생성은 선택된 저장소와 원격 브랜치를, merge·정리 증표 기록·삭제 검사는 GitHub PR 상태를 읽는다. 로컬 SQLite에는 반복 억제용 세션·디렉터리 해시와 단계 상태, 위 검토 증표 및 PR 번호·Git ref/SHA·원격 식별 해시에 묶인 정리 증표를 보존한다. 명시적으로 실행한 독립 리뷰는 별도 모델 세션을 열고 최종 리뷰 원문을 개인 기록에 보관한다. 일반 세션의 명령·프롬프트·답변·인증값은 수집하지 않는다. 14일 지난 세션 상태는 다음 처리 때 삭제한다. 동시 훅은 짧은 SQLite 트랜잭션으로 중복 알림을 억제한다.
 
 Codex는 turn_id를 사용하고 Claude는 UserPromptSubmit으로 입력 경계를 만든다. 경계가 없으면 이전 작업을 추정해 Stop을 재개하지 않는다. Claude에서 시작 이벤트 자체가 누락·실패한 뒤 이전 턴의 정상 상태만 남으면 새 입력인지 구분할 수 없다. 이 경우까지 일반 push의 PR 의도를 보장하지 않으며, 직접 create/merge·삭제 검사는 입력 의도와 무관하게 적용한다. 서브에이전트 전용 훅은 등록하지 않으며 모든 병렬·서브에이전트 상황의 동등성은 미검증이다.
 
