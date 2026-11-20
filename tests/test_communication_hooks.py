@@ -358,6 +358,29 @@ class CommunicationTests(unittest.TestCase):
         self.assertIn('older than 24 hours', stale['permissionDecisionReason'])
         self.assertIn('--independent-review --reviewer codex', stale['permissionDecisionReason'])
 
+    def test_merge_recovery_checks_existing_proof_before_requesting_new_review(self):
+        repo = self.feature_repo()
+        target = {'base': self.git(repo, 'rev-parse', 'main'), 'head': self.git(repo, 'rev-parse', 'HEAD')}
+        failed = ('bfa2a266-3a72-4b44-96a1-887d29b76dc9', '{}', {'verdict': 'blocked', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=failed):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        recovery = self.merge_with_review(repo, target)
+        self.assertIn('--independent-review', recovery['permissionDecisionReason'])
+
+        completed = ('8765807b-c946-4e88-b635-c2eb6728a098', '{}', {'verdict': 'pass', 'findings': []})
+        with patch.object(HOOK, 'run_independent_review', return_value=completed):
+            HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        with closing(sqlite3.connect(HOOK.safe_state_path(self.root))) as db, db:
+            db.execute('DELETE FROM reviews')
+        with patch.object(HOOK, 'independent_review_required', return_value=True):
+            reusable = self.merge_with_review(repo, target)
+        self.assertIn('No review receipt', reusable['permissionDecisionReason'])
+        self.assertNotIn('--independent-review', reusable['permissionDecisionReason'])
+        with patch.object(HOOK.time, 'time', return_value=HOOK.time.time() + HOOK.REVIEW_MAX_AGE + 1):
+            expired = self.merge_with_review(repo, target)
+        self.assertIn('--independent-review', expired['permissionDecisionReason'])
+
     def test_merge_recovery_uses_the_explicit_repository(self):
         repo = self.independent_policy_repo()
         self.git(repo, 'remote', 'add', 'other', 'https://github.com/audit/second.git')

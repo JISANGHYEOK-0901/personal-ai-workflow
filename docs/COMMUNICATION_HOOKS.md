@@ -75,7 +75,7 @@ PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft�
 
 ### 독립 리뷰 증거
 
-새 머지 훅은 대상 base의 `.workflow-pr.json`에 `"require_independent_review": true`가 있으면 독립 리뷰 증거를 요구한다. 정책을 base 커밋에서 읽으므로 검토할 head가 파일을 변경해도 현재 머지 조건은 해당 base를 따른다. 정책을 적용하는 환경에서는 최종 커밋 검토 명령에 `--independent-review`를 추가한다. 증표가 없거나 만료됐을 때는 조회한 PR의 base 정책을 확인할 수 있으면 복구 명령에 이 옵션을 표시한다.
+새 머지 훅은 대상 base의 `.workflow-pr.json`에 `"require_independent_review": true`가 있으면 독립 리뷰 증거를 요구한다. 정책을 base 커밋에서 읽으므로 검토할 head가 파일을 변경해도 현재 머지 조건은 해당 base를 따른다. 정책을 적용하는 환경에서는 최종 커밋 검토 명령에 `--independent-review`를 추가한다. 증표가 없거나 만료됐을 때는 조회한 PR의 base 정책과 같은 SHA의 증거를 확인해 복구 명령을 제시한다. 유효한 독립 증거가 있으면 일반 갱신으로 재사용한다.
 
 실제 작업공간에 새 런타임을 설치한 뒤 `--check`와 사용하는 도구의 훅 실행을 확인한다. 독립 리뷰 정책의 도입 요건은 GitHub의 클래식 브랜치 보호다. 대상 base에 필수 CI, 최신 base 반영, 관리자 적용을 설정하고 새 훅에서 해당 보호를 확인한다. [도구에서 활성화 확인](#도구에서-활성화-확인)을 따른 다음 대상 base에 다음 정책을 반영한다.
 

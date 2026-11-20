@@ -1564,7 +1564,7 @@ def load_review_receipt(root, repo):
         ).fetchone()
 
 
-def merge_recovery_requires_review(repo, boundary, state=None):
+def merge_recovery_requires_review(root, repo, boundary, state=None):
     number, head = boundary.get('pr_number'), boundary.get('match_head')
     if (not isinstance(number, str) or not number.isdigit() or not isinstance(head, str)
             or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head)):
@@ -1584,8 +1584,22 @@ def merge_recovery_requires_review(repo, boundary, state=None):
                 return False
         elif identity not in {remote_identity(repo, remote) for remote in remotes}:
             return False
-        return independent_review_required(repo, base)
-    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+        identity = digest(identity)
+        with closing(sqlite3.connect(safe_state_path(root), timeout=review_timeout(1))) as db, db:
+            ensure_review_table(db)
+            proof = db.execute(
+                'SELECT proof, updated FROM independent_reviews '
+                'WHERE repository_identity=? AND base_sha=? AND head_sha=?',
+                (identity, base, head),
+            ).fetchone()
+        if proof is None:
+            return independent_review_required(repo, base)
+        try:
+            verify_independent_review(root, *proof, base, head, identity)
+        except (OSError, TypeError, ValueError):
+            return True
+        return False
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError, sqlite3.Error):
         return False
 
 
@@ -1662,9 +1676,9 @@ def check_review(root, cwd, boundary, reviewer=None):
             repo = resolve_repo(root, cwd, boundary.get('repo'))
             command = review_record_command(root, repo)
             if not requires_independent_review and isinstance(exc, PRBaseChanged):
-                requires_independent_review = merge_recovery_requires_review(repo, boundary, exc.state)
+                requires_independent_review = merge_recovery_requires_review(root, repo, boundary, exc.state)
             elif requires_independent_review is None and merge_lookup_allowed:
-                requires_independent_review = merge_recovery_requires_review(repo, boundary)
+                requires_independent_review = merge_recovery_requires_review(root, repo, boundary)
         except (OSError, TypeError, ValueError, subprocess.SubprocessError):
             command = review_record_command(root, repository_candidate(cwd, boundary.get('repo')))
         if requires_independent_review:
