@@ -496,6 +496,69 @@ class CommunicationTests(unittest.TestCase):
         receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
         self.assertEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
 
+    def test_requested_review_holds_push_and_create_during_and_after_failure(self):
+        repo = self.feature_repo().resolve()
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        identity = HOOK.remote_identity(repo, 'origin')
+        boundaries = [{'action': 'push'}, {'action': 'create', 'base': 'main', 'head': 'feature'}]
+        outcomes = []
+
+        def observe_gates():
+            for boundary in boundaries:
+                outcomes.append(HOOK.check_review(self.root, repo, boundary))
+
+        def blocked_review(*args):
+            observe_gates()
+            return ('49b87145-5985-41c0-a5d6-25d861c7861c', '{}',
+                    {'verdict': 'blocked', 'findings': []})
+
+        with patch.object(HOOK, 'check_push'), patch.object(
+                HOOK, 'remote_repository_identity', return_value=identity), patch.object(
+                HOOK, 'remote_branch_sha', return_value=receipt['head']):
+            with patch.object(HOOK, 'run_independent_review', side_effect=blocked_review):
+                with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                    HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+            observe_gates()
+        self.assertEqual(len(outcomes), 4)
+        for output in outcomes:
+            self.assertIsNotNone(output)
+            self.assertEqual(output['hookSpecificOutput']['permissionDecision'], 'deny')
+
+    def test_unsuccessful_independent_review_does_not_create_a_pass_receipt(self):
+        repo = self.feature_repo().resolve()
+        review = {'verdict': 'unverified', 'findings': []}
+        session = '3849d6e3-2d88-46b2-8295-9eb76570e960'
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', review)):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.assertIsNone(HOOK.load_review_receipt(self.root, repo))
+
+    def test_review_cli_choice_supports_single_provider_installations(self):
+        for reviewer in ('claude', 'codex'):
+            with self.subTest(reviewer=reviewer), patch.object(
+                    HOOK.shutil, 'which', side_effect=lambda name: '/tools/' + name if name == reviewer else None):
+                self.assertEqual(HOOK.select_reviewer(None), reviewer)
+        with patch.object(HOOK.shutil, 'which', side_effect=lambda name: '/tools/' + name):
+            with self.assertRaisesRegex(ValueError, 'Specify --reviewer'):
+                HOOK.select_reviewer(None)
+            self.assertEqual(HOOK.select_reviewer('claude'), 'claude')
+
+    def test_claude_review_verifies_native_init_result_and_session_identity(self):
+        session = '0905d5fe-e416-43f2-b54f-a70ccc572b4b'
+        report = {'base_sha': 'a' * 40, 'head_sha': 'b' * 40, 'verdict': 'pass',
+                  'summary': 'Diff reviewed.', 'findings': []}
+        init = {'type': 'system', 'subtype': 'init', 'session_id': session}
+        result = {'type': 'result', 'subtype': 'success', 'session_id': session,
+                  'is_error': False, 'structured_output': report}
+        events = '\n'.join(json.dumps(event) for event in (init, result))
+        self.assertEqual(HOOK.parse_independent_review(
+            events, None, report['base_sha'], report['head_sha'], 'claude'),
+            (session, json.dumps(report, ensure_ascii=False), report))
+        result['session_id'] = 'a different session'
+        events = '\n'.join(json.dumps(event) for event in (init, result))
+        with self.assertRaisesRegex(ValueError, 'completed independent Claude session'):
+            HOOK.parse_independent_review(events, None, report['base_sha'], report['head_sha'], 'claude')
+
     def test_independent_report_requires_a_completed_session_and_matching_shas(self):
         base, head = 'a' * 40, 'b' * 40
         session = '1781d06f-4d89-4c14-ba15-ace8f3c61898'
@@ -504,7 +567,8 @@ class CommunicationTests(unittest.TestCase):
         report = {'base_sha': base, 'head_sha': head, 'verdict': 'pass',
                   'summary': 'Diff reviewed.', 'findings': []}
         raw_report = json.dumps(report)
-        self.assertEqual(HOOK.parse_independent_review(complete, raw_report, base, head), (session, report))
+        self.assertEqual(HOOK.parse_independent_review(complete, raw_report, base, head),
+                         (session, raw_report, report))
         with self.assertRaisesRegex(ValueError, 'completed independent review session'):
             HOOK.parse_independent_review(started, raw_report, base, head)
         with self.assertRaisesRegex(ValueError, 'base and HEAD'):

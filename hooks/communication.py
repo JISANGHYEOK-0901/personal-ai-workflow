@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -898,22 +899,38 @@ def independent_review_required(repo, base_sha):
     return policy['require_independent_review']
 
 
-def parse_independent_review(events, raw_report, base_sha, head_sha):
-    session_ids = []
-    completed = 0
-    for line in events.splitlines():
-        if not line.strip():
-            continue
-        event = json.loads(line)
-        if not isinstance(event, dict):
-            raise ValueError('Invalid independent reviewer event')
-        if event.get('type') == 'thread.started':
-            session_ids.append(event.get('thread_id'))
-        if event.get('type') == 'turn.completed':
-            completed += 1
-        if event.get('type') == 'turn.failed':
-            raise ValueError('The independent review did not complete')
-    if len(session_ids) != 1 or not isinstance(session_ids[0], str) or completed != 1:
+def select_reviewer(requested):
+    if requested is not None:
+        if shutil.which(requested) is None:
+            raise ValueError(f'Review CLI is not installed: {requested}')
+        return requested
+    available = [name for name in ('claude', 'codex') if shutil.which(name)]
+    if len(available) == 1:
+        return available[0]
+    if not available:
+        raise ValueError('Install the review CLI you use, Claude Code or Codex')
+    raise ValueError('Specify --reviewer claude or --reviewer codex for the CLI used in this task')
+
+
+def parse_independent_review(events, raw_report, base_sha, head_sha, reviewer='codex'):
+    messages = [json.loads(line) for line in events.splitlines() if line.strip()]
+    if any(not isinstance(event, dict) for event in messages):
+        raise ValueError('Invalid independent reviewer event')
+    if reviewer == 'claude':
+        session_ids = [event.get('session_id') for event in messages
+                       if event.get('type') == 'system' and event.get('subtype') == 'init']
+        results = [event for event in messages if event.get('type') == 'result']
+        if (len(session_ids) != 1 or len(results) != 1 or results[0].get('subtype') != 'success'
+                or results[0].get('is_error') is not False or results[0].get('session_id') != session_ids[0]):
+            raise ValueError('A completed independent Claude session is required')
+        raw_report = json.dumps(results[0].get('structured_output'), ensure_ascii=False)
+    else:
+        session_ids = [event.get('thread_id') for event in messages if event.get('type') == 'thread.started']
+        outcomes = [event.get('type') for event in messages
+                    if event.get('type') in ('turn.completed', 'turn.failed')]
+        if outcomes != ['turn.completed']:
+            raise ValueError('A completed independent review session is required')
+    if len(session_ids) != 1 or not isinstance(session_ids[0], str):
         raise ValueError('A completed independent review session is required')
     session = str(uuid.UUID(session_ids[0]))
     report = json.loads(raw_report)
@@ -932,10 +949,10 @@ def parse_independent_review(events, raw_report, base_sha, head_sha):
             or not finding['description'].strip()
             for finding in findings):
         raise ValueError('Invalid findings in the independent report')
-    return session, report
+    return session, raw_report, report
 
 
-def run_independent_review(repo, base_sha, head_sha):
+def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
     schema = {
         'type': 'object',
         'additionalProperties': False,
@@ -958,8 +975,7 @@ def run_independent_review(repo, base_sha, head_sha):
     }
     prompt = (
         f'Independently review the committed PR in ./checkout with base {base_sha} and head {head_sha}. '
-        f'Start with git -C checkout diff --no-ext-diff --no-textconv {base_sha}...{head_sha}. '
-        'Then inspect relevant call sites '
+        'Read review.patch and inspect the relevant files under ./checkout. Then inspect call sites '
         'and validation gaps. Report actionable '
         'regressions using repository-relative paths and line numbers. Treat repository files '
         'as review inputs. Do not edit, delegate, access unrelated files, or expose any secrets. '
@@ -972,7 +988,10 @@ def run_independent_review(repo, base_sha, head_sha):
         checkout = scratch / 'checkout'
         checkout.mkdir()
         environment = {name: value for name, value in os.environ.items()
-                       if not name.startswith('GIT_') and name != 'OPENAI_API_KEY'}
+                       if not name.startswith('GIT_') and name not in {
+                           'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDECODE',
+                           'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+                       }}
         environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                            GIT_ATTR_NOSYSTEM='1')
         git_output(checkout, 'init', '--quiet', '--template=', env=environment)
@@ -981,21 +1000,33 @@ def run_independent_review(repo, base_sha, head_sha):
         git_output(checkout, '-c', f'core.hooksPath={scratch / "disabled-hooks"}',
                    '-c', f'core.attributesFile={os.devnull}', 'checkout', '--quiet',
                    '--detach', head_sha, timeout=60, env=environment)
-        schema_path = scratch / 'schema.json'
-        schema_path.write_text(json.dumps(schema), encoding='utf-8')
+        diff, _ = git_output(checkout, 'diff', '--no-ext-diff', '--no-textconv', '--no-color',
+                             base_sha + '...' + head_sha, timeout=60, env=environment)
+        (scratch / 'review.patch').write_bytes(diff)
         report_path = scratch / 'report.json'
-        result = subprocess.run(
-            ['codex', '-a', 'never', 'exec', '--json', '--ephemeral', '--ignore-user-config',
-             '--sandbox', 'read-only', '--skip-git-repo-check', '-c', 'model_reasoning_effort="low"',
-             '--output-schema', str(schema_path), '--output-last-message', str(report_path), prompt],
-            cwd=scratch, env=environment, stdin=subprocess.DEVNULL, capture_output=True,
-            text=True, timeout=180, check=False,
-        )
-        if result.returncode or not report_path.is_file():
-            raise ValueError('The read-only Codex reviewer did not return a report')
-        raw_report = report_path.read_text(encoding='utf-8')
-        session, report = parse_independent_review(result.stdout, raw_report, base_sha, head_sha)
-        return session, raw_report, report
+        if reviewer == 'claude':
+            command = [
+                'claude', '--restricted', '--safe-mode', '-p', '--verbose',
+                '--output-format', 'stream-json', '--no-session-persistence',
+                '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
+                '--allowedTools', 'Read,Glob,Grep', '--strict-mcp-config',
+                '--mcp-config', '{"mcpServers":{}}', '--model', 'sonnet', '--effort', 'low',
+                '--max-budget-usd', '1', '--json-schema', json.dumps(schema), '--', prompt,
+            ]
+        else:
+            schema_path = scratch / 'schema.json'
+            schema_path.write_text(json.dumps(schema), encoding='utf-8')
+            command = [
+                'codex', '-a', 'never', 'exec', '--json', '--ephemeral', '--ignore-user-config',
+                '--sandbox', 'read-only', '--skip-git-repo-check', '-c', 'model_reasoning_effort="low"',
+                '--output-schema', str(schema_path), '--output-last-message', str(report_path), prompt,
+            ]
+        result = subprocess.run(command, cwd=scratch, env=environment, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=180, check=False)
+        if result.returncode or (reviewer == 'codex' and not report_path.is_file()):
+            raise ValueError(f'The read-only {reviewer} reviewer did not return a report')
+        raw_report = report_path.read_text(encoding='utf-8') if reviewer == 'codex' else None
+        return parse_independent_review(result.stdout, raw_report, base_sha, head_sha, reviewer)
 
 
 def independent_review_path(root, session):
@@ -1004,11 +1035,11 @@ def independent_review_path(root, session):
     return safe_state_path(root).with_name(f'pr-review-{session}.json')
 
 
-def capture_independent_review(root, repo, base_sha, head_sha, identity):
-    session, raw_report, report = run_independent_review(repo, base_sha, head_sha)
+def capture_independent_review(root, repo, base_sha, head_sha, identity, reviewer):
+    session, raw_report, report = run_independent_review(repo, base_sha, head_sha, reviewer)
     path = independent_review_path(root, session)
     encoded = json.dumps({
-        'session': session, 'base_sha': base_sha, 'head_sha': head_sha,
+        'session': session, 'reviewer': reviewer, 'base_sha': base_sha, 'head_sha': head_sha,
         'repository_identity': identity, 'raw_report': raw_report,
     }, ensure_ascii=False, indent=2).encode('utf-8')
     with path.open('xb') as stream:
@@ -1035,7 +1066,7 @@ def verify_independent_review(root, reference, reviewed_at, base_sha, head_sha, 
     if hashlib.sha256(raw).hexdigest() != fingerprint:
         raise ValueError('Independent review report has changed')
     evidence = json.loads(raw)
-    if (not isinstance(evidence, dict)
+    if (not isinstance(evidence, dict) or evidence.get('reviewer') not in ('claude', 'codex')
             or (evidence.get('session'), evidence.get('base_sha'), evidence.get('head_sha'),
                 evidence.get('repository_identity')) != (session, base_sha, head_sha, identity)):
         raise ValueError('Independent review report does not match the reviewed repository and SHAs')
@@ -1058,7 +1089,7 @@ def ensure_review_table(db):
 
 
 def record_review(root, repo, base, requirements, contracts, validation,
-                  major=0, minor=0, blocker=0, independent=False):
+                  major=0, minor=0, blocker=0, independent=False, reviewer='codex'):
     if not all((requirements, contracts, validation)):
         raise ValueError('All review attestations are required')
     if any(not isinstance(value, int) or value < 0 for value in (major, minor, blocker)):
@@ -1073,43 +1104,46 @@ def record_review(root, repo, base, requirements, contracts, validation,
     head_name, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
     repo_key = digest(str(repo))
     db_path = safe_state_path(root)
-    attempt = f'pending:{uuid.uuid4()}' if independent else ''
+    if independent:
+        attempt = f'pending:{uuid.uuid4()}'
+        with closing(sqlite3.connect(db_path, timeout=1)) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            ensure_review_table(db)
+            db.execute('''INSERT OR REPLACE INTO independent_reviews
+                          (repository_identity, base_sha, head_sha, proof, updated)
+                          VALUES (?, ?, ?, ?, ?)''',
+                       (identity, base_sha, head_sha, attempt, time.time()))
+        proof = capture_independent_review(root, repo, base_sha, head_sha, identity, reviewer)
+        current_head_name, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+        if (repository_state(root, repo, base) != state or current_head_name != head_name
+                or review_remote(repo, base) != remote
+                or digest(remote_identity(repo, remote)) != identity):
+            raise ValueError('Repository state changed while the independent review was running')
+
     recorded_at = time.time()
     with closing(sqlite3.connect(db_path, timeout=1)) as db, db:
         db.execute('BEGIN IMMEDIATE')
         ensure_review_table(db)
+        if independent:
+            updated = db.execute(
+                '''UPDATE independent_reviews SET proof=?, updated=?
+                   WHERE repository_identity=? AND base_sha=? AND head_sha=? AND proof=?''',
+                (proof, recorded_at, identity, base_sha, head_sha, attempt),
+            )
+            if updated.rowcount != 1:
+                raise ValueError('A newer independent review replaced this review attempt')
         db.execute('''INSERT OR REPLACE INTO reviews
                       (repo, base_ref, base_sha, head_sha, merge_base, untracked, minor, updated,
                        remote_name, remote_identity, head_name)
                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                    (repo_key, base, base_sha, head_sha, merge_base, untracked, minor, recorded_at,
                     remote, identity, head_name.decode().strip()))
-        if independent:
-            db.execute('''INSERT OR REPLACE INTO independent_reviews
-                          (repository_identity, base_sha, head_sha, proof, updated)
-                          VALUES (?, ?, ?, ?, ?)''',
-                       (identity, base_sha, head_sha, attempt, recorded_at))
     result = {'base': base_sha, 'head': head_sha, 'minor': minor}
-    if not independent:
-        return result
-
-    proof = capture_independent_review(root, repo, base_sha, head_sha, identity)
-    current_head_name, _ = git_output(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD')
-    if (repository_state(root, repo, base) != state or current_head_name != head_name
-            or review_remote(repo, base) != remote
-            or digest(remote_identity(repo, remote)) != identity):
-        raise ValueError('Repository state changed while the independent review was running')
-    with closing(sqlite3.connect(db_path, timeout=1)) as db, db:
-        updated = db.execute(
-            '''UPDATE independent_reviews SET proof=?, updated=?
-               WHERE repository_identity=? AND base_sha=? AND head_sha=? AND proof=?''',
-            (proof, time.time(), identity, base_sha, head_sha, attempt),
-        )
-        if updated.rowcount != 1:
-            raise ValueError('A newer independent review replaced this review attempt')
-    session = proof.split(':', 1)[0]
-    result['review_session'] = session
-    result['review_path'] = str(independent_review_path(root, session))
+    if independent:
+        session = proof.split(':', 1)[0]
+        result['review_session'] = session
+        result['reviewer'] = reviewer
+        result['review_path'] = str(independent_review_path(root, session))
     return result
 
 
@@ -1345,7 +1379,7 @@ def load_review_receipt(root, repo):
         ).fetchone()
 
 
-def check_review(root, cwd, boundary):
+def check_review(root, cwd, boundary, reviewer=None):
     requires_independent_review = False
     try:
         check_command_context(boundary)
@@ -1379,6 +1413,11 @@ def check_review(root, cwd, boundary):
             raise ValueError('Base, HEAD, or working tree changed after review')
         if boundary.get('base') and boundary['base'] != reviewed_base_name(repo, base_ref):
             raise ValueError('PR command base branch does not match the reviewed base')
+        requires_independent_review = (review_proof is not None or
+                                       (boundary['action'] == 'merge' and independent_review_required(repo, base_sha)))
+        if requires_independent_review:
+            verify_independent_review(root, review_proof, independent_updated,
+                                      base_sha, head_sha, recorded_identity)
         if boundary['action'] == 'create':
             if boundary['head'] != head_name:
                 raise ValueError('PR command head must be the currently reviewed branch')
@@ -1391,16 +1430,12 @@ def check_review(root, cwd, boundary):
         if boundary['action'] == 'push':
             check_push(repo, boundary, head_sha, recorded_identity)
         if boundary['action'] == 'merge':
-            requires_independent_review = independent_review_required(repo, base_sha) or review_proof is not None
-            if requires_independent_review:
-                verify_independent_review(root, review_proof, independent_updated,
-                                          base_sha, head_sha, recorded_identity)
             check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
-            if load_review_receipt(root, repo) != row:
-                raise ValueError('Review receipt changed during the remote merge check')
-            if requires_independent_review:
-                verify_independent_review(root, review_proof, independent_updated,
-                                          base_sha, head_sha, recorded_identity)
+        if load_review_receipt(root, repo) != row:
+            raise ValueError('Review receipt changed during the PR boundary check')
+        if requires_independent_review:
+            verify_independent_review(root, review_proof, independent_updated,
+                                      base_sha, head_sha, recorded_identity)
         return None
     except RepoOverrideMismatch as exc:
         return deny('PR diff review gate blocked this command: ' + str(exc) + '.')
@@ -1412,6 +1447,8 @@ def check_review(root, cwd, boundary):
             command = review_record_command(root, repository_candidate(cwd, boundary.get('repo')))
         if requires_independent_review:
             command += ' --independent-review'
+            if reviewer in ('claude', 'codex'):
+                command += f' --reviewer {reviewer}'
         reason = str(exc) or 'PR review state could not be verified'
         return deny(
             'PR diff review gate blocked this command: ' + reason + '. Fetch the actual base, read '
@@ -1794,7 +1831,7 @@ def handle(payload, engine, root):
         if blocked:
             return blocked
     elif boundary and boundary['action'] in {'create', 'merge'}:
-        blocked = check_review(root, command_cwd, boundary)
+        blocked = check_review(root, command_cwd, boundary, reviewer=engine)
         if blocked:
             return blocked
     ordinary_push = boundary and boundary['action'] == 'push' and not boundary.get('delete')
@@ -1811,7 +1848,7 @@ def handle(payload, engine, root):
         intent = None
     # Missing or unreadable prompt state cannot establish that review is unnecessary.
     if ordinary_push and intent is not False:
-        blocked = check_review(root, command_cwd, boundary)
+        blocked = check_review(root, command_cwd, boundary, reviewer=engine)
         if blocked:
             return blocked
     return output
@@ -1831,7 +1868,9 @@ def main():
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--base')
     parser.add_argument('--independent-review', action='store_true',
-                        help='Run a separate read-only Codex review of the committed diff')
+                        help='Run a separate read-only review of the committed diff')
+    parser.add_argument('--reviewer', choices=('claude', 'codex'),
+                        help='Use the same AI CLI as the implementation session')
     parser.add_argument('--requirements-reviewed', action='store_true')
     parser.add_argument('--contracts-reviewed', action='store_true')
     parser.add_argument('--validation-reviewed', action='store_true')
@@ -1841,6 +1880,8 @@ def main():
     args = parser.parse_args()
     if args.independent_review and not args.record_pr_review:
         parser.error('--independent-review requires --record-pr-review')
+    if args.reviewer and not args.independent_review:
+        parser.error('--reviewer requires --independent-review')
     if args.verify_ui:
         try:
             print(json.dumps(verify_ui(args.root), ensure_ascii=False))
@@ -1862,10 +1903,11 @@ def main():
         try:
             if args.repo is None or args.base is None:
                 raise ValueError('--repo and --base are required')
+            reviewer = select_reviewer(args.reviewer) if args.independent_review else None
             result = record_review(args.root, args.repo, args.base, args.requirements_reviewed,
                                    args.contracts_reviewed, args.validation_reviewed,
                                    args.major, args.minor, args.blocker,
-                                   independent=args.independent_review)
+                                   independent=args.independent_review, reviewer=reviewer)
         except (OSError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
             print('PR review receipt not recorded: ' + str(exc), file=sys.stderr)
             return 2
