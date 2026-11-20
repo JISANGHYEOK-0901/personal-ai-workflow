@@ -26,6 +26,8 @@ git diff --check
 
 ## 서버 정책과 한계
 
-워크플로를 추가해도 develop의 required status check·브랜치 보호·머지 큐가 자동 설정되지 않는다. 현재 이들은 미설정이다. 실제 계정 지원·비용·운영 방식을 확인해 별도 설정해야 서버가 실패한 머지를 차단한다. 에이전트는 그 전에도 실패·대기 CI를 성공으로 보고하지 않고 머지를 중단한다.
+GitHub의 `develop`은 GitHub Actions가 발행한 `integrity` 체크를 필수로 요구한다. 최신 base를 요구하는 strict 모드이며 관리자에게도 적용된다. 서버 설정은 [develop 보호 설정](https://github.com/JISANGHYEOK-0901/personal-ai-workflow/settings/branches)에서 확인한다. PR #23에서 검사 진행 중 머지가 `BLOCKED`였고 성공 뒤 `CLEAN`으로 바뀌었다.
+
+로컬 머지 훅은 CI 목록이 비어 있거나 확인되지 않으면 해당 명령을 거부한다. 서버는 이름과 발행 앱이 지정된 필수 검사를 확인한다. 필수 검사가 등록되거나 재실행을 마칠 때까지 기다린 뒤 현재 head와 결과를 함께 재조회한다.
 
 이 suite는 스크립트·파일 정합성과 Git 경계를 검사한다. AI의 전체 행동·PHP/Next.js/Spring 애플리케이션·실제 동시 머지 경쟁 검증은 아니다.

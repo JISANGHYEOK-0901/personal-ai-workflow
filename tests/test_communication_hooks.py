@@ -314,9 +314,11 @@ class CommunicationTests(unittest.TestCase):
                    conclusion in {'SUCCESS', 'NEUTRAL', 'SKIPPED'}) for conclusion in
                   ('SUCCESS', 'NEUTRAL', 'SKIPPED', 'FAILURE', 'NEW_STATE', '')]
         cases += [({}, False), ({'conclusion': 'SUCCESS'}, False)]
-        for check, allowed in cases:
-            with self.subTest(check=check), patch.object(
-                    HOOK, 'remote_pr_state', return_value={**remote, 'statusCheckRollup': [check]}):
+        rollups = [(None, False), ([], False)]
+        rollups.extend(([check], allowed) for check, allowed in cases)
+        for rollup, allowed in rollups:
+            with self.subTest(rollup=rollup), patch.object(
+                    HOOK, 'remote_pr_state', return_value={**remote, 'statusCheckRollup': rollup}):
                 result = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
                     'command': 'gh pr merge 17 --merge --match-head-commit ' + receipt['head']})
                 self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision') != 'deny',

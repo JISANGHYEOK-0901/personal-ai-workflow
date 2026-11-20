@@ -801,6 +801,8 @@ def check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_ident
     checks = state.get('statusCheckRollup')
     if not isinstance(checks, list):
         raise ValueError('The remote PR CI state could not be read')
+    if not checks:
+        raise ValueError('The remote PR has no reported CI checks')
     for check in checks:
         if not isinstance(check, dict):
             raise ValueError('The remote PR CI state has an invalid shape')
