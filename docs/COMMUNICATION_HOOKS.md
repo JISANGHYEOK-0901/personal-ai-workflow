@@ -71,7 +71,7 @@ python3 .workflow-hooks/communication.py \
 gh pr merge 123 --merge --match-head-commit <reviewed-full-head-sha>
 ```
 
-PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft·mergeable 상태, PR 번호, 저장소 식별값, 원격 base 브랜치와 base/head SHA, 현재 CI rollup을 확인한다. 원격 base/head가 증표와 다르거나 CI가 pending·실패·미확인이면 merge를 거부한다. StatusContext는 `SUCCESS`만 허용하며 `EXPECTED`도 미완료로 처리한다. CheckRun은 `COMPLETED`와 `SUCCESS/NEUTRAL/SKIPPED` 결론이 모두 있어야 한다. CI가 하나도 설정되지 않은 저장소에서는 없는 검사를 통과로 꾸미지 않으며, 프로젝트 정책에 따라 별도로 미설정을 보고한다. 조회는 읽기 전용이지만 GitHub 인증·네트워크가 필요하고 확인할 수 없는 해당 PR 명령은 fail closed다. `--admin` 우회와 `--delete-branch` 동시 삭제는 허용하지 않으며 삭제는 아래 정리 경로로 분리한다.
+PreToolUse는 실행 직전 `gh pr view`로 해당 PR을 읽고 OPEN·non-draft·mergeable 상태, PR 번호, 저장소 식별값, 원격 base 브랜치와 base/head SHA, 현재 CI rollup을 확인한다. 원격 base/head가 증표와 다르거나 CI 목록이 비어 있거나 pending·실패·미확인이면 merge를 거부한다. StatusContext는 `SUCCESS`만 허용하며 `EXPECTED`도 미완료로 처리한다. CheckRun은 `COMPLETED`와 `SUCCESS/NEUTRAL/SKIPPED` 결론이 모두 있어야 한다. 프로젝트가 요구하는 개별 체크의 이름과 발행 앱은 서버 보호 설정에서 확인한다. 조회는 읽기 전용이지만 GitHub 인증·네트워크가 필요하고 확인할 수 없는 해당 PR 명령은 fail closed다. `--admin` 우회와 `--delete-branch` 동시 삭제는 허용하지 않으며 삭제는 아래 정리 경로로 분리한다.
 
 ### 머지 후 정리 증표
 

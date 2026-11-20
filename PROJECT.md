@@ -14,6 +14,6 @@
 - grip-it 편집 훅: 세션 작업공간의 `ai-input/grip/` 기록부에 명시한 작업 트리·브랜치·파일이 일치하면, 형제 저장소에서도 미결 선택에 의존하는 직접 편집을 거부한다. 기록 형식은 `skills/grip-it/references/register.md`에 있고 회귀 검증은 `tests/test_grip_edit_gate.py`에 포함한다.
 - UI 변경 검증: 설치 범위 내 UI 변경은 현재 입력 해시에 연결된 Playwright 보고서·조작·스크린샷 근거가 있어야 Stop과 PR 경계를 통과한다. 프로젝트별 `.workflow-ui.json`의 paths/inputs/command/base로 설정하고 `--verify-ui`로 실행한다. 실제 실행 불가는 명시 미완료로만 종료하며 PR은 계속 차단한다. 회귀 검증: `tests/test_ui_gate.py`.
 
-- 동시 작업: 정합성 CI는 PR·develop/main push에서 실행한다. 서버의 필수 체크·머지 큐는 아직 미설정. 동시 머지가 발생하면 SHA 재확인만으로 원자성을 주장하지 않고 pr-lifecycle의 조율 경계를 따른다. 작업 branch는 과업별 분리한다.
+- 동시 작업: 정합성 CI는 PR·develop/main push에서 실행한다. GitHub의 develop 보호는 Actions가 발행한 `integrity`를 최신 base 기준으로 관리자에게도 요구한다. 동시 머지는 pr-lifecycle의 조율 경계를 따르고 작업 branch를 과업별로 분리한다.
 
 - PR 요청 기본 범위: 사용자 지정으로 “PR해줘”는 검증·검토·PR 생성·머지·작업 브랜치 정리까지 포함. 생성만/검토만/머지 금지 등 명시 제한은 우선한다.
