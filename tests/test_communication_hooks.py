@@ -67,10 +67,10 @@ class CommunicationTests(unittest.TestCase):
         return subprocess.run(['git', '-C', str(repo), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def feature_repo(self):
+    def feature_repo(self, object_format='sha1'):
         repo = self.root / 'app'
         repo.mkdir()
-        self.git(repo, 'init', '-q', '-b', 'main')
+        self.git(repo, 'init', '-q', '-b', 'main', '--object-format=' + object_format)
         self.git(repo, 'config', 'user.name', 'Hook Test')
         self.git(repo, 'config', 'user.email', 'hook@example.invalid')
         self.git(repo, 'remote', 'add', 'origin', 'https://github.com/audit/sample.git')
@@ -532,6 +532,39 @@ class CommunicationTests(unittest.TestCase):
             return run_git(args, **kwargs)
 
         with patch.object(HOOK.subprocess, 'run', side_effect=observe_patch):
+            with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
+                HOOK.run_independent_review(repo, base, head)
+
+    def test_sha256_review_includes_contract_changes_from_a_diverged_base(self):
+        repo = self.feature_repo(object_format='sha256')
+        self.git(repo, 'switch', 'main')
+        api = repo / 'api.py'
+        api.write_text('def lookup(identifier):\n    return identifier\n')
+        self.git(repo, 'add', 'api.py')
+        self.git(repo, 'commit', '-qm', 'original signature')
+        self.git(repo, 'switch', 'feature')
+        self.git(repo, 'merge', '--no-edit', 'main')
+        (repo / 'caller.py').write_text('from api import lookup\nresult = lookup("value")\n')
+        self.git(repo, 'add', 'caller.py')
+        self.git(repo, 'commit', '-qm', 'call the original API')
+        self.git(repo, 'switch', 'main')
+        api.write_text('def lookup(identifier, required):\n    return identifier, required\n')
+        self.git(repo, 'commit', '-qam', 'advance the base signature')
+        self.git(repo, 'switch', 'feature')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        self.assertEqual((len(base), len(head)), (64, 64))
+        run_git = subprocess.run
+
+        def observe_patches(args, **kwargs):
+            if args[0] == 'codex':
+                scratch = kwargs['cwd']
+                self.assertIn('+result = lookup("value")', (scratch / 'review.patch').read_text())
+                self.assertIn('+def lookup(identifier, required):', (scratch / 'base.patch').read_text())
+                self.assertIn('def lookup(identifier):', (scratch / 'checkout/api.py').read_text())
+                raise RuntimeError('reviewer reached')
+            return run_git(args, **kwargs)
+
+        with patch.object(HOOK.subprocess, 'run', side_effect=observe_patches):
             with self.assertRaisesRegex(RuntimeError, 'reviewer reached'):
                 HOOK.run_independent_review(repo, base, head)
 
