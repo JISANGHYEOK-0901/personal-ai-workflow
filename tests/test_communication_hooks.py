@@ -358,6 +358,20 @@ class CommunicationTests(unittest.TestCase):
         self.assertIn('older than 24 hours', stale['permissionDecisionReason'])
         self.assertIn('--independent-review --reviewer codex', stale['permissionDecisionReason'])
 
+    def test_merge_recovery_uses_the_explicit_repository(self):
+        repo = self.independent_policy_repo()
+        self.git(repo, 'remote', 'add', 'other', 'https://github.com/audit/second.git')
+        base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
+        pr = {'number': 17, 'baseRefOid': base, 'headRefOid': head,
+              'url': 'https://github.com/audit/second/pull/17'}
+        with patch.object(HOOK, 'remote_pr_state', return_value=pr) as lookup:
+            output = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                'command': f'gh pr merge 17 --repo audit/second --merge --match-head-commit {head}'})
+        lookup.assert_called_once_with(repo.resolve(), '17', repository='github.com/audit/second')
+        reason = output['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('No review receipt', reason)
+        self.assertIn('--independent-review --reviewer codex', reason)
+
     def test_merge_recovery_uses_policy_when_remote_base_advances(self):
         repo = self.feature_repo()
         self.git(repo, 'update-ref', 'refs/remotes/origin/main', self.git(repo, 'rev-parse', 'main'))

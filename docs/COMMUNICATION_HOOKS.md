@@ -123,7 +123,7 @@ Stop은 최종 답변의 특정 단어, ‘미결사항 없음’ 선언, 작업
 - 셸의 Python/Node/셸 스크립트 등은 내용이 불투명하므로 편집 상기만 제공한다. 인용된 예제 문자열이나 heredoc 본문을 배포 명령으로 해석하지 않는다.
 - 읽기 명령, 문서·이미지·테스트·개인 기록·도구 설정 파일만의 변경에는 종료 재점검을 추가하지 않는다.
 
-이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 웹에서 직접 만든 PR을 모두 포괄하지 않는다. `gh pr merge`의 직접 경로는 원격 PR과 로컬 검토 증거를 결속하지만 조회와 실제 merge 사이의 경쟁을 원자적으로 막지는 못한다. `--match-head-commit`은 서버가 허용할 head를 고정한다. 독립 리뷰 경로의 최신 base 보호는 조회 이후 새 base가 head에 포함되지 않은 PR의 머지를 서버에서 막는다. 동시 PR 대상 변경까지 포함한 base/head 원자성은 GitHub API의 제약으로 남는다. [GitHub 머지 API의 SHA 조건](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request) 로컬 훅을 비활성화하거나 설정 신뢰를 해제하면 우회할 수 있으므로 저장소 전체 강제력에는 서버의 필수 CI·브랜치 보호를 함께 사용한다.
+이 분류는 휴리스틱이다. 다른 MCP 쓰기 도구, 임의 래퍼·동적 셸 실행·기존 PTY의 입력, 웹에서 직접 만든 PR을 모두 포괄하지 않는다. `gh pr merge`의 직접 경로는 원격 PR과 로컬 검토 증거를 결속하지만 조회와 실제 merge 사이의 경쟁을 원자적으로 막지는 못한다. `--match-head-commit`은 서버가 허용할 head를 고정한다. 독립 리뷰 경로의 최신 base 보호는 조회 이후 새 base가 head에 포함되지 않은 PR의 머지를 서버에서 막는다. 같은 대상 브랜치가 head에 포함된 조상으로만 전진했다면 merge commit의 파일 트리는 검토한 head와 일치한다. 이 경우에도 실제 base SHA는 조회 시점과 다를 수 있다. 동시 PR 대상 변경까지 포함한 base/head 원자성은 GitHub API의 제약으로 남는다. [GitHub 머지 API의 SHA 조건](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request) 로컬 훅을 비활성화하거나 설정 신뢰를 해제하면 우회할 수 있으므로 저장소 전체 강제력에는 서버의 필수 CI·브랜치 보호를 함께 사용한다.
 
 ## 설치·갱신·제거
 
