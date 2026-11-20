@@ -5,13 +5,14 @@
 ## 현재 구현 v0.1
 
 - [공통 원칙](workflow/CORE.md): AZTKS를 기본 작성·검증 과정에 반영. 별도 호출이나 매번 평가표가 필요하지 않다.
+- [grip-it](skills/grip-it/SKILL.md): 착수 전 미결 결정 전체를 보여주고, 한 토픽씩 확정해 프로젝트 문서와 재개 가능한 기록부에 반영한다. “grip-it으로 결정부터 정리해줘”로 시작하거나 구현을 구속하는 중요 미결정이 발견되면 execute에서 이어진다.
 - [execute](skills/execute/SKILL.md): 목표·미정 결정·실행·영향 추적·검증·종료. 사실·MINOR·MAJOR·BLOCKER를 구분하고 변경 작업의 최종 diff를 의미적으로 검토한다.
 - [pr-lifecycle](skills/pr-lifecycle/SKILL.md): PR 생성·검토·승인된 머지·base 동기화·로컬/원격 작업 브랜치 정리. 공통 diff 게이트를 적용하고 동시 작업과 base/head 전진 시 검토·검증 기준을 재확인한다.
 - [handoff](skills/handoff/SKILL.md): 다른 세션·도구가 이어받는 인계 문서를 `ai-input/handoff/YYYY-MM/`에 쓰고 같은 작업은 갱신한다. 커밋하지 않는다.
 - [프로젝트 설정](PROJECT.md) / [설정 템플릿](templates/PROJECT.md): 실제 경로·검증·Git·한도를 환경별로 정의한다.
 - [작업 기록 정책](docs/WORKLOG_POLICY.md): 작업 ID별 갱신, 월별 폴더. ai-input 전체는 항상 Git 제외.
 - [전달 점검과 PR diff 검토 훅](docs/COMMUNICATION_HOOKS.md): Codex·Claude에서 중요 영향 안내를 상기하고, PR 요청에는 검토 컨텍스트를 주입한다. 단독 PR 명령의 실제 branch·remote를 base/HEAD 증표와 대조하며, merge는 원격 PR·CI를 확인한다. 머지 후 삭제는 별도 MERGED 증표와 정확한 SHA lease를 사용한다.
-- [스킬 정리 내역](docs/SKILL_INVENTORY.md): 원본 8개 스킬과 에이전트는 비활성 보관하고 활성 경로에는 execute·pr-lifecycle·handoff를 둔다.
+- [스킬 정리 내역](docs/SKILL_INVENTORY.md): 활성 정본과 비활성 보관 원본의 출처·역할을 확인한다.
 
 ## 관리
 
