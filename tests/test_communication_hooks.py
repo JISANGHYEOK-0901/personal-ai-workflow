@@ -390,12 +390,15 @@ class CommunicationTests(unittest.TestCase):
         config = self.root / 'gh-config'
         config.mkdir()
         (config / 'hosts.yml').write_text('enterprise.example.invalid:\n  git_protocol: https\n')
+        enterprise = {**pr, 'url': 'https://enterprise.example.invalid/audit/second/pull/17'}
         with patch.dict(os.environ, {'GH_CONFIG_DIR': str(config)}), patch.object(
-                HOOK, 'remote_pr_state', return_value=pr) as lookup:
+                HOOK, 'remote_pr_state', return_value=enterprise) as lookup:
             ambiguous = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
                 'command': f'gh pr merge 17 --repo audit/second --merge --match-head-commit {head}'})
-            self.assertIn('HOST/OWNER/REPO', ambiguous['hookSpecificOutput']['permissionDecisionReason'])
-            lookup.assert_not_called()
+            self.assertNotIn('--independent-review', ambiguous['hookSpecificOutput']['permissionDecisionReason'])
+            lookup.assert_called_once_with(repo.resolve(), '17', repository='audit/second')
+            lookup.reset_mock()
+            lookup.return_value = pr
             output = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
                 'command': f'gh pr merge 17 --repo github.com/audit/second --merge --match-head-commit {head}'})
         lookup.assert_called_once_with(repo.resolve(), '17', repository='github.com/audit/second')
@@ -441,6 +444,9 @@ class CommunicationTests(unittest.TestCase):
             receipt = HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
 
         self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+        ambiguous = self.merge_with_review(repo, receipt, options='--repo audit/sample')
+        self.assertEqual(ambiguous['permissionDecision'], 'deny')
+        self.assertIn('HOST/OWNER/REPO', ambiguous['permissionDecisionReason'])
         auto = self.merge_with_review(repo, receipt, options='--auto')
         self.assertEqual(auto['permissionDecision'], 'deny')
         self.assertIn('remove --auto', auto['permissionDecisionReason'])

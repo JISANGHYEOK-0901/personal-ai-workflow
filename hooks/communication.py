@@ -808,7 +808,10 @@ class PRBaseChanged(ValueError):
 def merge_pr_state(repo, pr_number, boundary):
     override = boundary.get('remote_repo')
     if isinstance(override, str):
-        return remote_pr_state(repo, pr_number, repository=gh_repo_identity(override))
+        identity = gh_repo_identity(override)
+        if len(override.strip('/').split('/')) == 2 and '@' not in override:
+            identity = identity.split('/', 1)[1]
+        return remote_pr_state(repo, pr_number, repository=identity)
     return remote_pr_state(repo, pr_number)
 
 
@@ -1650,8 +1653,6 @@ def check_review(root, cwd, boundary, reviewer=None):
     try:
         check_command_context(boundary)
         override = boundary.get('remote_repo')
-        if boundary['action'] == 'merge' and isinstance(override, str) and len(override.split('/')) < 3:
-            return deny('Use --repo HOST/OWNER/REPO to identify the merge target.')
         repo = resolve_repo(root, cwd, boundary.get('repo'))
         # Explain a different --repo target before asking for this checkout's receipt.
         check_repo_override(repo, boundary, named_remotes(repo))
@@ -1687,8 +1688,11 @@ def check_review(root, cwd, boundary, reviewer=None):
         requires_independent_review = (review_proof is not None or
                                        (boundary['action'] == 'merge' and independent_review_required(repo, base_sha)))
         if requires_independent_review:
-            if boundary['action'] == 'merge' and boundary.get('auto'):
-                return deny('Use an immediate merge and remove --auto when an independent review is required.')
+            if boundary['action'] == 'merge':
+                if isinstance(override, str) and len(override.strip('/').split('/')) < 3:
+                    return deny('Use --repo HOST/OWNER/REPO to identify the independently reviewed merge target.')
+                if boundary.get('auto'):
+                    return deny('Use an immediate merge and remove --auto when an independent review is required.')
             verify_independent_review(root, review_proof, independent_updated,
                                       base_sha, head_sha, recorded_identity)
             review_verified = True
