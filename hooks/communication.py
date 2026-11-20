@@ -119,8 +119,7 @@ def outside_installation(payload, root):
     if name in {'Write', 'Edit', 'MultiEdit'}:
         return scoped_path(root, cwd, args.get('file_path')) is False
     if name == 'apply_patch':
-        paths = re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
-                           str(args.get('command', args.get('patch', ''))), re.M)
+        paths = direct_edit_paths(name, args)
         return bool(paths) and all(scoped_path(root, cwd, path) is False for path in paths)
     if name not in {'Bash', 'exec_command'}:
         return scoped_path(root, cwd) is False
@@ -665,19 +664,24 @@ def shell_kind(command):
     return shell_events(command)[0]
 
 
+def direct_edit_paths(name, args):
+    if not isinstance(args, dict):
+        return []
+    if name == 'apply_patch':
+        return re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
+                          str(args.get('command', args.get('patch', ''))), re.M)
+    if name in {'Edit', 'Write', 'MultiEdit'} and isinstance(args.get('file_path'), str):
+        return [args['file_path']]
+    return []
+
+
 def classify(payload, root=None):
     name, args = payload.get('tool_name'), payload.get('tool_input', {})
     if not isinstance(args, dict):
         return '', set(), False
     if name in {'Bash', 'exec_command'}:
         return shell_kind(str(args.get('command', args.get('cmd', '')))), set(), False
-    paths = []
-    if name == 'apply_patch':
-        paths = re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
-                           str(args.get('command', args.get('patch', ''))), re.M)
-    elif name in {'Edit', 'Write', 'MultiEdit'}:
-        if isinstance(args.get('file_path'), str):
-            paths = [args['file_path']]
+    paths = direct_edit_paths(name, args)
     groups, sensitive = file_scope(paths, payload.get('cwd', '.'), root)
     return ('edit' if groups else ''), groups, sensitive
 
@@ -1453,12 +1457,95 @@ def ui_gate(root, event, release=False, force=False):
         return {'decision': 'block', 'reason': message} if event == 'Stop' else deny(message)
 
 
+def grip_relative_file(worktree, name):
+    if not isinstance(name, str) or not name:
+        return None
+    relative = Path(name)
+    if relative.is_absolute() or '..' in relative.parts or not relative.parts:
+        return None
+    try:
+        path = (worktree / relative).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return path if path.is_relative_to(worktree) else None
+
+
+def grip_topic_ready(text, topic, worktree):
+    rows = re.findall(rf'^- \[[ xX]\] {re.escape(topic)} \| (?:CORE|MINOR) \| (.+)$',
+                      text, re.M)
+    if len(rows) != 1:
+        return False
+    fields = dict(field.split(':', 1) for field in rows[0].split(' | ')[1:] if ':' in field)
+    if fields.get('status') == 'DROPPED':
+        return bool(fields.get('reason', '').strip())
+    if fields.get('status') != 'RESOLVED' or not fields.get('decision', '').strip():
+        return False
+    try:
+        applied = json.loads(fields.get('applied', '[]'))
+    except ValueError:
+        return False
+    if not isinstance(applied, list) or not applied:
+        return False
+    documents = [grip_relative_file(worktree, name) for name in applied]
+    return all(document is not None and document.is_file() for document in documents)
+
+
+def grip_edit_gate(payload, root):
+    paths = direct_edit_paths(payload.get('tool_name'), payload.get('tool_input', {}))
+    cwd = payload.get('cwd')
+    if not paths or not isinstance(cwd, str) or not Path(cwd).is_absolute():
+        return {}
+    registry = root / 'ai-input' / 'grip'
+    if not registry.is_dir() or registry.resolve() != registry:
+        return {}
+    edits = {(Path(cwd) / path).resolve() for path in paths}
+    for register in sorted(registry.glob('*/GRIP_REGISTER.md')):
+        if not register.is_file() or register.is_symlink() or register.parent.is_symlink():
+            continue
+        try:
+            if register.stat().st_size > MAX_INPUT:
+                continue
+            text = register.read_text(encoding='utf-8')
+            block = re.search(r'^```grip-edit-scope[ \t]*\n(.*?)^```[ \t]*$', text, re.M | re.S)
+            scope = json.loads(block.group(1)) if block else None
+            if not isinstance(scope, dict):
+                continue
+            target, branch, blocked_by = (scope.get(key) for key in ('worktree', 'branch', 'blocked_by'))
+            if not isinstance(target, str) or not Path(target).is_absolute():
+                continue
+            if not isinstance(branch, str) or not branch or not isinstance(blocked_by, dict):
+                continue
+            worktree = Path(target).resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        for topic, names in blocked_by.items():
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', topic) or not isinstance(names, list):
+                continue
+            dependencies = {grip_relative_file(worktree, name) for name in names}
+            if not edits.intersection(dependencies) or grip_topic_ready(text, topic, worktree):
+                continue
+            try:
+                current, _ = git_output(worktree, 'symbolic-ref', '--quiet', '--short', 'HEAD',
+                                        allowed=(0, 1))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return deny(f'Grip-it {topic}: 작업 브랜치를 확인한 뒤 등록된 파일을 편집합니다.')
+            if current.decode().strip() == branch:
+                return deny(f'Grip-it {topic}: 먼저 결정을 확정하고 관련 문서와 기록부에 반영합니다.')
+            break
+    return {}
+
+
 def handle(payload, engine, root):
     if not isinstance(payload, dict):
         return {}
     event = payload.get('hook_event_name')
     if event not in {'UserPromptSubmit', 'PreToolUse', 'Stop'}:
         return {}
+    if event == 'PreToolUse':
+        # A local register can explicitly bind an edit in a sibling worktree.
+        blocked = grip_edit_gate(payload, root)
+        if blocked:
+            return blocked
     if outside_installation(payload, root):
         return {}
     if event == 'UserPromptSubmit' and not task_notification(payload):
