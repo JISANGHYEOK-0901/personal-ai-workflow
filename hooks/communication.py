@@ -431,7 +431,7 @@ def uncertain_shell(message):
 
 
 def push_boundary(words, repo=None):
-    """Accept one explicit destination and refspec; never infer push.default."""
+    """Read push arguments without resolving Git configuration."""
     boundary = {'action': 'push', 'repo': repo, 'base': None, 'remote': None,
                 'refspec': None, 'lease': None, 'delete': False, 'error': None,
                 'cleanup_options': True, 'dry_run': False, 'help': False,
@@ -471,10 +471,12 @@ def push_boundary(words, repo=None):
         else:
             positional.append(word)
     boundary['delete'] |= any(word.startswith((':', '+:')) for word in positional)
-    if len(positional) != 2:
-        boundary['error'] = 'git push requires one explicit named remote and one refspec'
-    else:
-        boundary['remote'], boundary['refspec'] = positional
+    if positional:
+        boundary['remote'] = positional[0]
+    if len(positional) > 2:
+        boundary['error'] = 'git push requires one named remote and one refspec'
+    elif len(positional) == 2:
+        boundary['refspec'] = positional[1]
     return boundary
 
 
@@ -1126,9 +1128,9 @@ def record_review(root, repo, base, requirements, contracts, validation,
         ensure_review_table(db)
         if independent:
             updated = db.execute(
-                '''UPDATE independent_reviews SET proof=?, updated=?
+                '''UPDATE independent_reviews SET proof=?
                    WHERE repository_identity=? AND base_sha=? AND head_sha=? AND proof=?''',
-                (proof, recorded_at, identity, base_sha, head_sha, attempt),
+                (proof, identity, base_sha, head_sha, attempt),
             )
             if updated.rowcount != 1:
                 raise ValueError('A newer independent review replaced this review attempt')
@@ -1459,6 +1461,41 @@ def check_review(root, cwd, boundary, reviewer=None):
             + command)
 
 
+def default_push_remote(repo, remotes):
+    branch, status = git_output(repo, 'symbolic-ref', '--quiet', 'HEAD', allowed=(0, 1))
+    if status == 0:
+        remote, _ = git_output(repo, 'for-each-ref', '--count=1', '--format=%(push:remotename)',
+                               branch.decode().strip())
+        if remote.strip():
+            return remote.decode().strip()
+    return remotes[0] if len(remotes) == 1 else 'origin'
+
+
+def single_push_source(repo, remote, refspec):
+    mirror, _ = git_output(repo, 'config', '--bool', '--get', f'remote.{remote}.mirror', allowed=(0, 1))
+    if mirror.strip() == b'true':
+        raise ValueError('Disable remote mirror before pushing to a repository with review records')
+    if refspec is None:
+        configured, _ = git_output(repo, 'config', '--null', '--get-all', f'remote.{remote}.push',
+                                   allowed=(0, 1))
+        if configured:
+            entries = configured[:-1].decode().split('\0')
+            if len(entries) != 1:
+                raise ValueError('Use a literal refspec instead of multiple configured push refspecs')
+            refspec = entries[0]
+        else:
+            mode, _ = git_output(repo, 'config', '--get', 'push.default', allowed=(0, 1))
+            if mode.strip() == b'nothing':
+                return None
+            if mode.strip() not in {b'', b'simple', b'current', b'upstream', b'tracking'}:
+                raise ValueError('Use a literal refspec when the default push source is ambiguous')
+            refspec = 'HEAD'
+    source, _, _ = refspec.lstrip('+').partition(':')
+    if not source or '*' in refspec or refspec.count(':') > 1:
+        raise ValueError('Use a literal refspec with one push source')
+    return commit_sha(repo, source)
+
+
 def check_requested_independent_push(root, cwd, boundary, reviewer):
     try:
         repo = resolve_repo(root, cwd, boundary.get('repo'))
@@ -1466,7 +1503,7 @@ def check_requested_independent_push(root, cwd, boundary, reviewer):
         return None
     try:
         remotes = named_remotes(repo)
-        remote = boundary.get('remote')
+        remote = boundary.get('remote') or default_push_remote(repo, remotes)
         candidates = [remote] if remote in remotes else remotes
         identities = set()
         for name in candidates:
@@ -1483,20 +1520,23 @@ def check_requested_independent_push(root, cwd, boundary, reviewer):
             placeholders = ','.join('?' for _ in identities)
             rows = db.execute(
                 'SELECT repository_identity, base_sha, head_sha, proof, updated '
-                f'FROM independent_reviews WHERE repository_identity IN ({placeholders})',
+                f'FROM independent_reviews WHERE repository_identity IN ({placeholders}) '
+                'ORDER BY updated DESC, rowid DESC',
                 sorted(identities),
             ).fetchall()
         if not rows:
             return None
-        refspec = boundary.get('refspec')
-        if (boundary.get('error') or remote not in remotes or not isinstance(refspec, str)
-                or not refspec or '*' in refspec or refspec.count(':') > 1):
-            raise ValueError('Use one named remote and a literal refspec for independently reviewed pushes')
-        source, _, _ = refspec.partition(':')
-        source_sha = commit_sha(repo, source.lstrip('+'))
+        check_command_context(boundary)
+        if remote not in remotes:
+            raise ValueError('Use one named remote for independently reviewed pushes')
+        source_sha = single_push_source(repo, remote, boundary.get('refspec'))
+        # A plain push has no PR base. Use the latest request for each destination
+        # and source SHA. Create and merge still check the exact reviewed base.
+        checked = set()
         for identity, base_sha, head_sha, proof, updated in rows:
-            if head_sha == source_sha:
+            if head_sha == source_sha and identity not in checked:
                 verify_independent_review(root, proof, updated, base_sha, head_sha, identity)
+                checked.add(identity)
     except (OSError, ValueError, TypeError, subprocess.SubprocessError, sqlite3.Error) as exc:
         command = review_record_command(root, repo) + f' --independent-review --reviewer {reviewer}'
         return deny('Independent review blocked this push: ' + str(exc) + '. Review command:\n' + command)
