@@ -387,9 +387,17 @@ class CommunicationTests(unittest.TestCase):
         base, head = self.git(repo, 'rev-parse', 'main'), self.git(repo, 'rev-parse', 'HEAD')
         pr = {'number': 17, 'baseRefOid': base, 'headRefOid': head,
               'url': 'https://github.com/audit/second/pull/17'}
-        with patch.object(HOOK, 'remote_pr_state', return_value=pr) as lookup:
-            output = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+        config = self.root / 'gh-config'
+        config.mkdir()
+        (config / 'hosts.yml').write_text('enterprise.example.invalid:\n  git_protocol: https\n')
+        with patch.dict(os.environ, {'GH_CONFIG_DIR': str(config)}), patch.object(
+                HOOK, 'remote_pr_state', return_value=pr) as lookup:
+            ambiguous = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
                 'command': f'gh pr merge 17 --repo audit/second --merge --match-head-commit {head}'})
+            self.assertIn('HOST/OWNER/REPO', ambiguous['hookSpecificOutput']['permissionDecisionReason'])
+            lookup.assert_not_called()
+            output = self.event('PreToolUse', tool_name='Bash', cwd=str(repo), tool_input={
+                'command': f'gh pr merge 17 --repo github.com/audit/second --merge --match-head-commit {head}'})
         lookup.assert_called_once_with(repo.resolve(), '17', repository='github.com/audit/second')
         reason = output['hookSpecificOutput']['permissionDecisionReason']
         self.assertIn('No review receipt', reason)
@@ -705,8 +713,11 @@ class CommunicationTests(unittest.TestCase):
                 self.assertIn('+result = lookup("value")', (scratch / 'review.patch').read_text())
                 self.assertIn('+def lookup(identifier, required):', (scratch / 'base.patch').read_text())
                 self.assertIn('def lookup(identifier):', (scratch / 'checkout/api.py').read_text())
-                self.assertEqual((scratch / 'merge-base-files/legacy.ps1').read_bytes(), previous)
-                self.assertEqual((scratch / 'target-base-files/legacy.ps1').read_bytes(), advanced)
+                binary_files = json.loads((scratch / 'binary-files.json').read_text())
+                original = binary_files['base.patch'][0]
+                self.assertEqual(original['path'], 'legacy.ps1')
+                self.assertEqual((scratch / original['before']).read_bytes(), previous)
+                self.assertEqual((scratch / original['after']).read_bytes(), advanced)
                 raise RuntimeError('reviewer reached')
             return run_git(args, **kwargs)
 
@@ -724,6 +735,23 @@ class CommunicationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, 'unverified because changed submodule revisions'):
             HOOK.run_independent_review(repo, base, head)
+
+    def test_review_snapshot_rejects_case_colliding_paths_that_were_not_materialized(self):
+        repo = self.feature_repo()
+        self.git(repo, 'config', 'core.ignorecase', 'false')
+        old_blob = self.git(repo, 'rev-parse', 'main:app.txt')
+        new_blob = self.git(repo, 'rev-parse', 'HEAD:app.txt')
+        self.git(repo, 'update-index', '--add', '--cacheinfo', f'100644,{old_blob},Caller.py')
+        self.git(repo, 'update-index', '--add', '--cacheinfo', f'100644,{new_blob},caller.py')
+        self.git(repo, 'commit', '-qm', 'store both case variants')
+        head = self.git(repo, 'rev-parse', 'HEAD')
+        names = self.git(repo, 'ls-tree', '--name-only', head).splitlines()
+        self.assertIn('Caller.py', names)
+        self.assertIn('caller.py', names)
+        (repo / 'Caller.py').write_text('base\n')
+
+        with self.assertRaisesRegex(ValueError, 'checkout does not reproduce the committed files'):
+            HOOK.verify_review_snapshot(repo.resolve(), head, 'sha1', os.environ)
 
     def test_independent_reviewer_subprocess_keeps_selected_api_auth(self):
         repo = self.feature_repo()

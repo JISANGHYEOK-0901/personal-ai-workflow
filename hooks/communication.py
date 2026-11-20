@@ -1078,7 +1078,7 @@ def codex_review_options(environment):
     return options
 
 
-def write_review_patch(repo, patch, merge_base, tip, environment, base_files=None):
+def write_review_patch(repo, patch, merge_base, tip, environment):
     options = ('-c', f'core.attributesFile={os.devnull}', 'diff',
                '--no-ext-diff', '--no-textconv', '--no-color')
     revisions = (merge_base, tip)
@@ -1090,25 +1090,61 @@ def write_review_patch(repo, patch, merge_base, tip, environment, base_files=Non
     binary_paths = {entry[len(binary_prefix):] for entry in stats.split(b'\0')
                     if entry.startswith(binary_prefix)}
     entries = modes.split(b'\0')
+    binary_files = []
     for metadata, name in zip(entries[::2], entries[1::2]):
         old_mode, new_mode, old_blob, new_blob, _ = metadata.removeprefix(b':').split()
         if b'160000' in (old_mode, new_mode):
             raise ValueError('Independent review is unverified because changed submodule revisions are unavailable')
         if name not in binary_paths:
             continue
-        relative = Path(os.fsdecode(name))
-        if relative.is_absolute() or '..' in relative.parts:
-            raise ValueError('Review file escaped its snapshot')
-        for directory, mode, oid in ((patch.parent / 'merge-base-files', old_mode, old_blob),
-                                     (base_files, new_mode, new_blob)):
-            if directory is None or mode == b'000000':
+        record = {'path': os.fsdecode(name)}
+        for side, mode, oid in (('before', old_mode, old_blob), ('after', new_mode, new_blob)):
+            record[side] = None
+            if mode == b'000000':
                 continue
-            destination = directory / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            blob, _ = git_output(repo, 'cat-file', 'blob', oid.decode(), timeout=60, env=environment)
-            destination.write_bytes(blob)
+            object_id = oid.decode('ascii')
+            relative = 'binary-blobs/' + object_id
+            destination = patch.parent / relative
+            if not destination.exists():
+                blob, _ = git_output(repo, 'cat-file', 'blob', object_id, timeout=60, env=environment)
+                destination.parent.mkdir(exist_ok=True)
+                destination.write_bytes(blob)
+            record[side] = relative
+        binary_files.append(record)
     diff, _ = git_output(repo, *options, *revisions, timeout=60, env=environment)
     patch.write_bytes(diff)
+    return binary_files
+
+
+def verify_review_snapshot(checkout, head_sha, object_format, environment):
+    manifest, _ = git_output(checkout, 'ls-tree', '-rz', head_sha, timeout=60, env=environment)
+    expected = {}
+    for row in manifest.split(b'\0'):
+        if row:
+            metadata, _, name = row.partition(b'\t')
+            _, kind, oid = metadata.split()
+            if kind == b'blob':
+                expected[os.fsdecode(name)] = oid
+
+    error = 'Independent review is unverified because the checkout does not reproduce the committed files'
+    for directory, subdirectories, names in os.walk(checkout):
+        directory = Path(directory)
+        if directory == checkout:
+            subdirectories.remove('.git')
+        for name in names:
+            path = directory / name
+            oid = expected.pop(path.relative_to(checkout).as_posix(), None)
+            if oid is None or path.is_symlink() or not path.is_file():
+                raise ValueError(error)
+            digest_value = hashlib.new(object_format)
+            digest_value.update(f'blob {path.stat().st_size}\0'.encode('ascii'))
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest_value.update(chunk)
+            if digest_value.hexdigest().encode('ascii') != oid:
+                raise ValueError(error)
+    if expected:
+        raise ValueError(error)
 
 
 def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
@@ -1136,7 +1172,7 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
         f'Independently review the committed PR in ./checkout with base {base_sha} and head {head_sha}. '
         'Read review.patch and inspect the committed head files under ./checkout. '
         'Read base.patch to see changes already present in the target base since it diverged. '
-        'For binary diff entries, inspect the original blobs in ./merge-base-files and ./target-base-files. '
+        'For binary diff entries, use binary-files.json to find the original before and after blobs. '
         'Review how those changes interact with the PR under the documented usage and deployment constraints. '
         'For preflight checks, assess the verified command boundary, subsequent server safeguards, '
         'and the impact of documented concurrency limits. Inspect call sites and validation gaps. Report actionable '
@@ -1162,16 +1198,18 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
                            GIT_ATTR_NOSYSTEM='1')
         merge_base, _ = git_output(repo, 'merge-base', base_sha, head_sha, env=environment)
         merge_base = merge_base.decode().strip()
-        object_format, _ = git_output(repo, 'rev-parse', '--show-object-format', env=environment)
+        format_name, _ = git_output(repo, 'rev-parse', '--show-object-format', env=environment)
+        object_format = format_name.decode().strip()
         git_output(checkout, 'init', '--quiet', '--template=',
-                   '--object-format=' + object_format.decode().strip(), env=environment)
+                   '--object-format=' + object_format, env=environment)
         commits = dict.fromkeys((merge_base, base_sha, head_sha))
         git_output(checkout, 'fetch', '--quiet', '--depth=1', '--no-tags', '--no-write-fetch-head',
                    str(repo), *commits, timeout=60, env=environment)
         # Generate both patches before loading the candidate's .gitattributes or index.
-        write_review_patch(checkout, scratch / 'review.patch', merge_base, head_sha, environment)
-        write_review_patch(checkout, scratch / 'base.patch', merge_base, base_sha,
-                           environment, base_files=scratch / 'target-base-files')
+        binary_files = {}
+        for filename, tip in (('review.patch', head_sha), ('base.patch', base_sha)):
+            binary_files[filename] = write_review_patch(checkout, scratch / filename, merge_base, tip, environment)
+        (scratch / 'binary-files.json').write_text(json.dumps(binary_files), encoding='utf-8')
         attributes = checkout / '.git/info/attributes'
         attributes.parent.mkdir(exist_ok=True)
         attributes.write_text('* -filter -ident -text -eol -crlf -working-tree-encoding\n', encoding='ascii')
@@ -1179,6 +1217,7 @@ def run_independent_review(repo, base_sha, head_sha, reviewer='codex'):
                    '-c', f'core.attributesFile={os.devnull}', '-c', 'core.symlinks=false',
                    '-c', 'core.autocrlf=false', 'checkout', '--quiet', '--detach',
                    head_sha, timeout=60, env=environment)
+        verify_review_snapshot(checkout, head_sha, object_format, environment)
         shutil.rmtree(checkout / '.git')
         report_path = scratch / 'report.json'
         auth = claude_auth if reviewer == 'claude' else codex_auth
@@ -1610,6 +1649,9 @@ def check_review(root, cwd, boundary, reviewer=None):
     deadline = PR_REVIEW_DEADLINE.set(time.monotonic() + PR_REVIEW_TIMEOUT)
     try:
         check_command_context(boundary)
+        override = boundary.get('remote_repo')
+        if boundary['action'] == 'merge' and isinstance(override, str) and len(override.split('/')) < 3:
+            return deny('Use --repo HOST/OWNER/REPO to identify the merge target.')
         repo = resolve_repo(root, cwd, boundary.get('repo'))
         # Explain a different --repo target before asking for this checkout's receipt.
         check_repo_override(repo, boundary, named_remotes(repo))
