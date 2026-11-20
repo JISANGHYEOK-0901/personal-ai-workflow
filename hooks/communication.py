@@ -1020,11 +1020,13 @@ def capture_independent_review(root, repo, base_sha, head_sha, identity):
     return f'{session}:{hashlib.sha256(encoded).hexdigest()}'
 
 
-def verify_independent_review(root, reference, base_sha, head_sha, identity):
+def verify_independent_review(root, reference, reviewed_at, base_sha, head_sha, identity):
     if not reference:
         raise ValueError('An independent review is required before merging')
     if reference.startswith('pending:'):
         raise ValueError('The independent review has not produced a passing report')
+    if not isinstance(reviewed_at, (int, float)) or not 0 <= time.time() - reviewed_at <= REVIEW_MAX_AGE:
+        raise ValueError('The independent review has expired')
     session, _, fingerprint = reference.partition(':')
     path = independent_review_path(root, session)
     if path.is_symlink() or not path.is_file():
@@ -1045,9 +1047,14 @@ def ensure_review_table(db):
                    merge_base TEXT, untracked TEXT NOT NULL DEFAULT '', minor INTEGER,
                    updated REAL)''')
     columns = {row[1] for row in db.execute('PRAGMA table_info(reviews)')}
-    for column in ('untracked', 'remote_name', 'remote_identity', 'head_name', 'independent_review'):
+    for column in ('untracked', 'remote_name', 'remote_identity', 'head_name'):
         if column not in columns:
             db.execute("ALTER TABLE reviews ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''")
+    # Independent state belongs to the reviewed objects, not the checkout's latest action.
+    db.execute('''CREATE TABLE IF NOT EXISTS independent_reviews
+                  (repository_identity TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL,
+                   proof TEXT NOT NULL, updated REAL NOT NULL,
+                   PRIMARY KEY (repository_identity, base_sha, head_sha))''')
 
 
 def record_review(root, repo, base, requirements, contracts, validation,
@@ -1071,22 +1078,17 @@ def record_review(root, repo, base, requirements, contracts, validation,
     with closing(sqlite3.connect(db_path, timeout=1)) as db, db:
         db.execute('BEGIN IMMEDIATE')
         ensure_review_table(db)
-        if not independent:
-            prior = db.execute(
-                'SELECT independent_review, updated FROM reviews '
-                'WHERE repo=? AND base_sha=? AND head_sha=? AND remote_identity=?',
-                (repo_key, base_sha, head_sha, identity),
-            ).fetchone()
-            if prior and prior[0].startswith('pending:'):
-                attempt = f'pending:{uuid.uuid4()}'
-            elif prior and prior[0] and 0 <= recorded_at - prior[1] <= REVIEW_MAX_AGE:
-                attempt, recorded_at = prior
         db.execute('''INSERT OR REPLACE INTO reviews
                       (repo, base_ref, base_sha, head_sha, merge_base, untracked, minor, updated,
-                       remote_name, remote_identity, head_name, independent_review)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                       remote_name, remote_identity, head_name)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                    (repo_key, base, base_sha, head_sha, merge_base, untracked, minor, recorded_at,
-                    remote, identity, head_name.decode().strip(), attempt))
+                    remote, identity, head_name.decode().strip()))
+        if independent:
+            db.execute('''INSERT OR REPLACE INTO independent_reviews
+                          (repository_identity, base_sha, head_sha, proof, updated)
+                          VALUES (?, ?, ?, ?, ?)''',
+                       (identity, base_sha, head_sha, attempt, recorded_at))
     result = {'base': base_sha, 'head': head_sha, 'minor': minor}
     if not independent:
         return result
@@ -1099,11 +1101,12 @@ def record_review(root, repo, base, requirements, contracts, validation,
         raise ValueError('Repository state changed while the independent review was running')
     with closing(sqlite3.connect(db_path, timeout=1)) as db, db:
         updated = db.execute(
-            'UPDATE reviews SET independent_review=?, updated=? WHERE repo=? AND independent_review=?',
-            (proof, time.time(), repo_key, attempt),
+            '''UPDATE independent_reviews SET proof=?, updated=?
+               WHERE repository_identity=? AND base_sha=? AND head_sha=? AND proof=?''',
+            (proof, time.time(), identity, base_sha, head_sha, attempt),
         )
         if updated.rowcount != 1:
-            raise ValueError('A newer receipt replaced this review attempt')
+            raise ValueError('A newer independent review replaced this review attempt')
     session = proof.split(':', 1)[0]
     result['review_session'] = session
     result['review_path'] = str(independent_review_path(root, session))
@@ -1333,9 +1336,13 @@ def check_cleanup(root, cwd, boundary):
 def load_review_receipt(root, repo):
     with closing(sqlite3.connect(safe_state_path(root), timeout=1)) as db, db:
         ensure_review_table(db)
-        return db.execute('SELECT base_ref, base_sha, head_sha, merge_base, untracked, updated, '
-                          'remote_name, remote_identity, head_name, independent_review '
-                          'FROM reviews WHERE repo=?', (digest(str(repo)),)).fetchone()
+        return db.execute(
+            '''SELECT r.base_ref, r.base_sha, r.head_sha, r.merge_base, r.untracked, r.updated,
+                      r.remote_name, r.remote_identity, r.head_name, i.proof, i.updated
+               FROM reviews AS r LEFT JOIN independent_reviews AS i
+               ON i.repository_identity=r.remote_identity AND i.base_sha=r.base_sha AND i.head_sha=r.head_sha
+               WHERE r.repo=?''', (digest(str(repo)),),
+        ).fetchone()
 
 
 def check_review(root, cwd, boundary):
@@ -1353,7 +1360,7 @@ def check_review(root, cwd, boundary):
         if not row:
             raise ValueError('No review receipt exists for this repository')
         (base_ref, base_sha, head_sha, merge_base, untracked, updated, remote,
-         recorded_identity, head_name, review_proof) = row
+         recorded_identity, head_name, review_proof, independent_updated) = row
         if not remote or not recorded_identity or not head_name:
             raise ValueError('The review receipt needs to be recorded again with repository identity')
         if digest(remote_identity(repo, remote)) != recorded_identity:
@@ -1384,14 +1391,16 @@ def check_review(root, cwd, boundary):
         if boundary['action'] == 'push':
             check_push(repo, boundary, head_sha, recorded_identity)
         if boundary['action'] == 'merge':
-            requires_independent_review = independent_review_required(repo, base_sha) or bool(review_proof)
+            requires_independent_review = independent_review_required(repo, base_sha) or review_proof is not None
             if requires_independent_review:
-                verify_independent_review(root, review_proof, base_sha, head_sha, recorded_identity)
+                verify_independent_review(root, review_proof, independent_updated,
+                                          base_sha, head_sha, recorded_identity)
             check_remote_pr(repo, boundary, base_ref, base_sha, head_sha, recorded_identity)
             if load_review_receipt(root, repo) != row:
                 raise ValueError('Review receipt changed during the remote merge check')
             if requires_independent_review:
-                verify_independent_review(root, review_proof, base_sha, head_sha, recorded_identity)
+                verify_independent_review(root, review_proof, independent_updated,
+                                          base_sha, head_sha, recorded_identity)
         return None
     except RepoOverrideMismatch as exc:
         return deny('PR diff review gate blocked this command: ' + str(exc) + '.')

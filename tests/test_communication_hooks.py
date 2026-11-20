@@ -372,11 +372,15 @@ class CommunicationTests(unittest.TestCase):
         session = '8c1aa752-8afb-4f4e-9fd4-d98f5ceb0c0f'
 
         def run_then_replace(*args):
-            HOOK.record_review(self.root, repo, 'main', True, True, True)
+            next_session = '42986aee-cf04-4724-80c1-3249b919cb40'
+            review = {'verdict': 'blocked', 'findings': []}
+            with patch.object(HOOK, 'run_independent_review', return_value=(next_session, '{}', review)):
+                with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                    HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
             return session, '{"late":"pass"}', {'verdict': 'pass', 'findings': []}
 
         with patch.object(HOOK, 'run_independent_review', side_effect=run_then_replace):
-            with self.assertRaisesRegex(ValueError, 'newer receipt'):
+            with self.assertRaisesRegex(ValueError, 'newer independent review'):
                 HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
         receipt = {'base': self.git(repo, 'rev-parse', 'main').strip(),
                    'head': self.git(repo, 'rev-parse', 'HEAD').strip()}
@@ -463,9 +467,34 @@ class CommunicationTests(unittest.TestCase):
         with patch.object(HOOK.time, 'time', return_value=original[5] + 60):
             HOOK.record_review(self.root, repo, 'main', True, True, True)
         current = HOOK.load_review_receipt(self.root, repo.resolve())
-        self.assertEqual(current[5], original[5])
-        self.assertEqual(current[-1], original[-1])
+        self.assertEqual(current[-2:], original[-2:])
         self.assertNotEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+
+    def test_expired_independent_review_remains_required_on_an_optional_base(self):
+        repo = self.feature_repo()
+        session = 'c5d6e36c-8110-438c-aa60-9abace804ddc'
+        report = {'verdict': 'pass', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', report)):
+            HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        clock_time = HOOK.time.time() + HOOK.REVIEW_MAX_AGE + 1
+        with patch.object(HOOK.time, 'time', return_value=clock_time):
+            receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+            self.assertEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
+
+    def test_recording_on_another_branch_preserves_the_blocked_review(self):
+        repo = self.feature_repo()
+        session = '2cf817ea-0190-42d4-b05b-ffc6364dc772'
+        review = {'verdict': 'blocked', 'findings': []}
+        with patch.object(HOOK, 'run_independent_review', return_value=(session, '{}', review)):
+            with self.assertRaisesRegex(ValueError, 'did not confirm a pass'):
+                HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
+        self.git(repo, 'switch', '-c', 'other-feature')
+        (repo / 'app.txt').write_text('other feature\n')
+        self.git(repo, 'commit', '-qam', 'other change')
+        HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.git(repo, 'switch', 'feature')
+        receipt = HOOK.record_review(self.root, repo, 'main', True, True, True)
+        self.assertEqual(self.merge_with_review(repo, receipt).get('permissionDecision'), 'deny')
 
     def test_independent_report_requires_a_completed_session_and_matching_shas(self):
         base, head = 'a' * 40, 'b' * 40
