@@ -352,6 +352,20 @@ class CommunicationTests(unittest.TestCase):
         self.assertIn('older than 24 hours', stale['permissionDecisionReason'])
         self.assertIn('--independent-review --reviewer codex', stale['permissionDecisionReason'])
 
+    def test_merge_recovery_uses_policy_when_remote_base_advances(self):
+        repo = self.feature_repo()
+        self.git(repo, 'update-ref', 'refs/remotes/origin/main', self.git(repo, 'rev-parse', 'main'))
+        receipt = HOOK.record_review(self.root, repo, 'origin/main', True, True, True)
+        self.git(repo, 'switch', 'main')
+        (repo / '.workflow-pr.json').write_text('{"require_independent_review": true}\n')
+        self.git(repo, 'add', '.workflow-pr.json')
+        self.git(repo, 'commit', '-qm', 'enable review in remote base')
+        target = {**receipt, 'base': self.git(repo, 'rev-parse', 'main')}
+        self.git(repo, 'switch', 'feature')
+        recovery = self.merge_with_review(repo, target)
+        self.assertIn('base SHA does not match', recovery['permissionDecisionReason'])
+        self.assertIn('--independent-review --reviewer codex', recovery['permissionDecisionReason'])
+
     def test_merge_uses_captured_review_and_rejects_changed_report(self):
         repo = self.independent_policy_repo()
         session = 'f054c0c1-965e-4b46-8394-cb598df7f573'
@@ -437,10 +451,20 @@ class CommunicationTests(unittest.TestCase):
                 HOOK.record_review(self.root, repo, 'main', True, True, True, independent=True)
         self.assertTrue(HOOK.independent_review_path(self.root, session).is_file())
 
-    def test_independent_checkout_keeps_host_git_programs_inactive(self):
+    def test_independent_checkout_exposes_only_the_patch_and_current_files(self):
         repo = self.feature_repo()
+        removed = repo / 'removed.txt'
+        removed.write_text('A historical-only test blob\n')
+        self.git(repo, 'add', 'removed.txt')
+        self.git(repo, 'commit', '-qm', 'historical file')
+        obsolete_blob = self.git(repo, 'rev-parse', 'HEAD:removed.txt')
+        self.git(repo, 'rm', 'removed.txt')
+        self.git(repo, 'commit', '-qm', 'delete historical file')
+        outside = self.root / 'outside.txt'
+        outside.write_text('Outside the review inputs.\n')
+        (repo / 'link.txt').symlink_to(outside)
         (repo / '.gitattributes').write_text('app.txt filter=proof-probe\n')
-        self.git(repo, 'add', '.gitattributes')
+        self.git(repo, 'add', '.gitattributes', 'link.txt')
         self.git(repo, 'commit', '-qm', 'declare filter on reviewed paths')
         base = self.git(repo, 'rev-parse', 'main').strip()
         head = self.git(repo, 'rev-parse', 'HEAD').strip()
@@ -460,6 +484,19 @@ class CommunicationTests(unittest.TestCase):
 
         def stop_at_reviewer(args, **kwargs):
             if args[0] == 'codex':
+                scratch = kwargs['cwd']
+                checkout = scratch / 'checkout'
+                self.assertFalse((checkout / '.git').exists())
+                self.assertFalse((checkout / 'removed.txt').exists())
+                self.assertFalse((checkout / 'link.txt').is_symlink())
+                self.assertEqual((checkout / 'link.txt').read_text(), str(outside))
+                inaccessible = run_git(['git', 'cat-file', '-e', obsolete_blob], cwd=checkout,
+                                       env=kwargs['env'], capture_output=True)
+                self.assertNotEqual(inaccessible.returncode, 0)
+                self.assertEqual((checkout / 'app.txt').read_text(), 'feature\n')
+                diff = (scratch / 'review.patch').read_text().strip()
+                self.assertEqual(diff, self.git(repo, 'diff', '--no-ext-diff', '--no-textconv',
+                                               '--no-color', base + '...' + head))
                 raise RuntimeError('reviewer reached')
             return run_git(args, **kwargs)
 
